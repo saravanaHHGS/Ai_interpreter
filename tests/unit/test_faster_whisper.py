@@ -28,6 +28,7 @@ from ai_interpreter.infrastructure.stt.faster_whisper import (
     WhisperDecodeOptions,
     _confidence_from_log_prob,
     frames_from_audio,
+    is_repetitive,
 )
 
 pytestmark = pytest.mark.unit
@@ -44,6 +45,7 @@ class FakeSegment:
     end: float
     avg_logprob: float = -0.2
     no_speech_prob: float = 0.01
+    compression_ratio: float = 1.2
 
 
 class FakeInfo:
@@ -278,6 +280,79 @@ class TestDecodeOptions:
         _recognizer(model, options=WhisperDecodeOptions(beam_size=5)).transcribe(_utterance())
 
         assert model.calls[0]["beam_size"] == 5
+
+
+class TestRepetitionDetection:
+    """Catching Whisper's decoder loops.
+
+    The strings here are verbatim from a live Tamil session on the target
+    machine, including the confidence scores they were produced with.
+    """
+
+    # Observed at confidence 0.91 and 0.93, while correct transcripts from the
+    # same session scored 0.46 to 0.67. Confidence is inverted on loops.
+    LOOP_A = " ".join(["பண்டும்"] * 32)
+    LOOP_B = " ".join(["கட்டிக்"] * 32)
+
+    def test_detects_a_single_word_loop(self) -> None:
+        assert is_repetitive(self.LOOP_A, min_word_diversity=0.4)
+        assert is_repetitive(self.LOOP_B, min_word_diversity=0.4)
+
+    def test_accepts_ordinary_tamil_speech(self) -> None:
+        # Verbatim from the same session, a plausible transcript.
+        text = "இது நாங்கள் திருப்பனி பார்த்தும் ஆனா இங்களைக் கடைக்கில்லை."
+        assert not is_repetitive(text, min_word_diversity=0.4)
+
+    def test_accepts_ordinary_english_speech(self) -> None:
+        assert not is_repetitive("Hi, hello, how are you doing today?", 0.4)
+
+    def test_ignores_short_utterances(self) -> None:
+        # "yes yes" and "no no no" are things people actually say.
+        assert not is_repetitive("no no no", min_word_diversity=0.4)
+        assert not is_repetitive("yes yes", min_word_diversity=0.4)
+
+    def test_detects_a_repeated_phrase(self) -> None:
+        assert is_repetitive("thank you thank you thank you thank you", 0.4)
+
+    def test_discards_a_repetitive_transcript(self) -> None:
+        # A loop is more confident by construction, so it must be rejected on
+        # structure rather than on confidence.
+        model = FakeWhisperModel([FakeSegment(self.LOOP_A, 0.0, 8.0, avg_logprob=-0.09)])
+        transcript = _recognizer(model).transcribe(_utterance())
+
+        assert transcript.is_empty
+        assert transcript.confidence.value > 0.9
+
+    def test_discards_a_segment_that_compresses_too_well(self) -> None:
+        model = FakeWhisperModel([FakeSegment("looping text", 0.0, 1.0, compression_ratio=3.5)])
+        assert _recognizer(model).transcribe(_utterance()).is_empty
+
+    def test_keeps_a_segment_with_a_normal_compression_ratio(self) -> None:
+        model = FakeWhisperModel(
+            [FakeSegment("normal speech here", 0.0, 1.0, compression_ratio=1.2)]
+        )
+        assert _recognizer(model).transcribe(_utterance()).text == "normal speech here"
+
+    def test_keeps_good_segments_when_one_is_repetitive(self) -> None:
+        model = FakeWhisperModel(
+            [
+                FakeSegment("Good morning everyone", 0.0, 1.0, compression_ratio=1.1),
+                FakeSegment("loop loop loop", 1.0, 2.0, compression_ratio=4.0),
+            ]
+        )
+        assert _recognizer(model).transcribe(_utterance()).text == "Good morning everyone"
+
+    def test_repetition_penalty_is_passed_to_the_decoder(self) -> None:
+        model = FakeWhisperModel([FakeSegment("Hi", 0.0, 1.0)])
+        _recognizer(model).transcribe(_utterance())
+
+        assert model.calls[0]["repetition_penalty"] > 1.0
+
+    def test_compression_threshold_is_passed_to_the_decoder(self) -> None:
+        model = FakeWhisperModel([FakeSegment("Hi", 0.0, 1.0)])
+        _recognizer(model).transcribe(_utterance())
+
+        assert model.calls[0]["compression_ratio_threshold"] == pytest.approx(2.4)
 
 
 class TestConfidenceFloor:

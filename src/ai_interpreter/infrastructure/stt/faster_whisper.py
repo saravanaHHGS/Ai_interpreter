@@ -109,6 +109,14 @@ class WhisperDecodeOptions:
             has already segmented the audio in Phase 3 - running a second
             detector would trim speech the first one deliberately kept.
         min_confidence: Transcripts below this confidence are returned empty.
+        repetition_penalty: Discourages the decoder from repeating tokens.
+            Slightly above 1.0 suppresses runaway loops at negligible cost to
+            normal speech.
+        compression_ratio_threshold: Segments whose text compresses better
+            than this are discarded as repetitive. This is the measure
+            Whisper itself uses to detect its own loops.
+        min_word_diversity: Fraction of distinct words a transcript must have.
+            A backstop for loops that slip past the compression check.
     """
 
     beam_size: int = 1
@@ -119,6 +127,43 @@ class WhisperDecodeOptions:
     word_timestamps: bool = False
     vad_filter: bool = False
     min_confidence: float = _DEFAULT_MIN_CONFIDENCE
+    repetition_penalty: float = 1.1
+    compression_ratio_threshold: float = 2.4
+    min_word_diversity: float = 0.4
+
+
+# Below this word count, a low diversity ratio is normal rather than a loop:
+# "yes yes" and "no no no" are things people actually say.
+_MIN_WORDS_FOR_DIVERSITY_CHECK: Final[int] = 6
+
+
+def is_repetitive(text: str, min_word_diversity: float) -> bool:
+    """Detect a decoder repetition loop.
+
+    Whisper sometimes falls into repeating one phrase for the whole output -
+    ``"பண்டும் பண்டும் பண்டும் ..."`` thirty-two times. Measured on the target
+    machine, those loops scored confidence **0.91 and 0.93** while correct
+    transcripts of the same session scored 0.46 to 0.67.
+
+    That inversion is the reason this check exists and the reason confidence
+    alone must never be used as a quality gate: a loop is *more* certain by
+    construction, because every repeated token is trivially predictable from
+    the one before it. The loops also took 3.7 s to decode against a normal
+    1.7 s, so catching them helps latency as well as correctness.
+
+    Args:
+        text: Transcript text.
+        min_word_diversity: Minimum fraction of distinct words. A loop of one
+            word repeated thirty-two times scores 0.03; ordinary speech scores
+            well above 0.5.
+
+    Returns:
+        ``True`` when the text looks like a loop rather than speech.
+    """
+    words = text.split()
+    if len(words) < _MIN_WORDS_FOR_DIVERSITY_CHECK:
+        return False
+    return (len(set(words)) / len(words)) < min_word_diversity
 
 
 def _confidence_from_log_prob(avg_log_prob: float) -> float:
@@ -433,6 +478,8 @@ class FasterWhisperRecognizer:
                 condition_on_previous_text=options.condition_on_previous_text,
                 no_speech_threshold=options.no_speech_threshold,
                 log_prob_threshold=options.log_prob_threshold,
+                compression_ratio_threshold=options.compression_ratio_threshold,
+                repetition_penalty=options.repetition_penalty,
                 word_timestamps=options.word_timestamps,
                 vad_filter=options.vad_filter,
             )
@@ -475,6 +522,19 @@ class FasterWhisperRecognizer:
             text = str(segment.text).strip()
             if not text:
                 continue
+
+            # Whisper's own repetition measure. A segment whose text gzips
+            # better than this is a loop, whatever its confidence says.
+            compression_ratio = float(getattr(segment, "compression_ratio", 0.0))
+            if compression_ratio > self._options.compression_ratio_threshold:
+                logger.warning(
+                    "Discarding a repetitive segment (compression ratio %.2f > %.2f): %d chars",
+                    compression_ratio,
+                    self._options.compression_ratio_threshold,
+                    len(text),
+                )
+                continue
+
             avg_log_prob = float(getattr(segment, "avg_logprob", 0.0))
             log_probs.append(avg_log_prob)
             domain_segments.append(
@@ -489,6 +549,18 @@ class FasterWhisperRecognizer:
         full_text = " ".join(segment.text for segment in domain_segments).strip()
         mean_log_prob = sum(log_probs) / len(log_probs) if log_probs else float("-inf")
         confidence = Confidence(_confidence_from_log_prob(mean_log_prob))
+
+        # Backstop for loops that span segments, where no single segment
+        # compresses badly enough to be caught above.
+        if full_text and is_repetitive(full_text, self._options.min_word_diversity):
+            logger.warning(
+                "Discarding a repetitive transcript (confidence %.2f, %d words): %s",
+                confidence.value,
+                len(full_text.split()),
+                full_text[:60],
+            )
+            full_text = ""
+            domain_segments = []
 
         if full_text and confidence.is_below(self._options.min_confidence):
             logger.debug(
