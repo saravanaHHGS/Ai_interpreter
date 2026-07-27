@@ -7,6 +7,7 @@ from ai_interpreter.application.services.profile_selector import (
     ProfileSelection,
     ProfileSelector,
 )
+from ai_interpreter.application.services.recognizer_router import RecognizerRouter
 from ai_interpreter.application.services.utterance_segmenter import (
     SegmenterState,
     SegmenterStats,
@@ -18,6 +19,7 @@ __all__ = [
     "CaptureStats",
     "ProfileSelection",
     "ProfileSelector",
+    "RecognizerRouter",
     "SegmenterState",
     "SegmenterStats",
     "UtteranceSegmenter",

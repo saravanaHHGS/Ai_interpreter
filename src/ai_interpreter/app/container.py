@@ -31,6 +31,7 @@ synthesizer. No other module ever chooses an implementation.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import TracebackType
@@ -315,12 +316,12 @@ class Container:
             msg = f"Unknown stt.provider {stt.provider!r}. Valid: faster_whisper"
             raise ConfigurationError(msg)
 
-        descriptor = self.models.get(f"whisper-{stt.model}")
-        model_dir = self.model_repository.ensure(descriptor)
-
         chosen = language
         if chosen is None:
             chosen = LanguageCode(stt.language) if stt.language else self.source_language()
+
+        descriptor = self.models.get(f"whisper-{self._model_name_for(chosen)}")
+        model_dir = self.model_repository.ensure(descriptor)
 
         # "*" means the full multilingual set; anything else is a fine-tune
         # restricted to the languages it was trained on.
@@ -340,6 +341,62 @@ class Container:
             ),
             supported_languages=supported,
         )
+
+    def describe_model_for(self, language: LanguageCode | None) -> str:
+        """Name the checkpoint that would serve a language, for display.
+
+        Args:
+            language: Language to describe, or ``None`` for the configured
+                source language.
+
+        Returns:
+            The registry identifier, e.g. ``"whisper-tamil-small"``.
+        """
+        chosen = language or (
+            LanguageCode(self.settings.stt.language)
+            if self.settings.stt.language
+            else self.source_language()
+        )
+        return f"whisper-{self._model_name_for(chosen)}"
+
+    def _model_name_for(self, language: LanguageCode | None) -> str:
+        """Resolve which Whisper checkpoint serves a language.
+
+        Args:
+            language: Language to serve, or ``None`` for the default model.
+
+        Returns:
+            The model name, from ``stt.language_models`` when the language has
+            an entry, otherwise ``stt.model``.
+        """
+        stt = self.settings.stt
+        if language is None:
+            return stt.model
+        return stt.language_models.get(language.code, stt.model)
+
+    def create_recognizer_router(self, languages: Sequence[LanguageCode] | None = None):  # type: ignore[no-untyped-def]
+        """Build a router that picks a recogniser per language.
+
+        No single checkpoint serves both directions of a Tamil/English
+        interpreter, so the pipeline holds this rather than one recogniser.
+
+        Args:
+            languages: Languages to serve, or ``None`` for both sides of the
+                configured language pair.
+
+        Returns:
+            A :class:`RecognizerRouter`. Models load lazily, so a session that
+            only ever speaks one language pays for one model.
+        """
+        from ai_interpreter.application.services.recognizer_router import RecognizerRouter
+
+        pair = self.settings.app.language_pair
+        chosen = (
+            tuple(languages)
+            if languages is not None
+            else (LanguageCode(pair.source), LanguageCode(pair.target))
+        )
+        return RecognizerRouter(factory=self.create_recognizer, languages=chosen)
 
     def create_segmenter(
         self,

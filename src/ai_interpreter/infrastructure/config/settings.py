@@ -264,6 +264,8 @@ class SttSection(BaseModel):
     language: str | None
     word_timestamps: bool
     min_confidence: Probability
+    # ISO 639-1 code -> model name. Empty means every language uses `model`.
+    language_models: dict[str, str]
 
 
 class TranslationCacheSection(BaseModel):

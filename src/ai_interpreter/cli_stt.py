@@ -140,7 +140,7 @@ def run_transcribe(container: Container, wav_path: Path, language: str | None) -
 
     try:
         heading("Loading")
-        row("Model", f"whisper-{stt.model} ({stt.compute_type}, {stt.device})")
+        row("Model", f"{container.describe_model_for(chosen)} ({stt.compute_type}, {stt.device})")
         row("Threads", str(stt.cpu_threads))
 
         recognizer = container.create_recognizer(chosen)
@@ -196,7 +196,10 @@ def run_listen(container: Container, seconds: float, device_name: str | None) ->
         device = container.resolve_input_device(device_name)
         heading("Configuration")
         row("Device", f"{device.name}  [{device.host_api}]")
-        row("Model", f"whisper-{stt.model} ({stt.compute_type}, {stt.cpu_threads} threads)")
+        row(
+            "Model",
+            f"{container.describe_model_for(None)} ({stt.compute_type}, {stt.cpu_threads} threads)",
+        )
 
         print("\n  Loading model...")
         recognizer = container.create_recognizer()

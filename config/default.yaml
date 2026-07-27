@@ -126,6 +126,23 @@ stt:
   # 0.0 disables the check; raise it once you have measured typical values.
   min_confidence: 0.0
 
+  # Per-language model overrides.
+  #
+  # No single checkpoint serves both directions of a Tamil/English
+  # interpreter. Measured on one Tamil sentence against a written reference:
+  # generic `base` has ~80% word error on Tamil, and the Tamil fine-tune has
+  # lost English entirely (it refuses rather than guessing). So each language
+  # gets the model that is actually good at it, and the router loads only the
+  # models the session needs.
+  #
+  #   ta -> tamil-small   ~0-8% error,  6-10 s   accurate but slow
+  #   en -> base          correct,      1.7 s    fast
+  #
+  # Remove an entry to fall back to `model` above.
+  language_models:
+    ta: tamil-small
+    en: base
+
   # null = models/ inside the project directory.
   download_root: null
 
