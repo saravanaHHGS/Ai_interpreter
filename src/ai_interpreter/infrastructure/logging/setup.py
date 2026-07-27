@@ -37,6 +37,7 @@ import logging
 import logging.handlers
 import queue
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 from types import TracebackType
 from typing import Any, Final, Self, TextIO
@@ -78,6 +79,70 @@ def transcript_extra() -> dict[str, Any]:
         A mapping suitable for the ``extra`` argument of a logging call.
     """
     return {_TRANSCRIPT_ATTR: True}
+
+
+class _ConsoleSuppression:
+    """Mutable threshold below which records are hidden from the console.
+
+    Held in one object so the tagging filter and the context manager share
+    state without a module-level global.
+    """
+
+    __slots__ = ("level",)
+
+    def __init__(self) -> None:
+        self.level = logging.NOTSET
+
+
+class _ConsoleTaggingFilter(logging.Filter):
+    """Marks records that the console should skip.
+
+    Attached to the ``QueueHandler``, so it runs on the **calling** thread at
+    the moment the record is created. That timing is the whole point: the
+    listener thread emits records later, potentially after a live display has
+    already finished, so a decision made at emit time would be a race. This
+    one is deterministic.
+
+    The record is always kept - only tagged. The file handlers ignore the tag,
+    so nothing is ever lost from the log.
+
+    Args:
+        state: Shared suppression threshold.
+    """
+
+    def __init__(self, state: _ConsoleSuppression) -> None:
+        super().__init__(name="console-tagging")
+        self._state = state
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        """Tag a record and always keep it.
+
+        Args:
+            record: Record being created.
+
+        Returns:
+            Always ``True``.
+        """
+        record.console_suppressed = record.levelno < self._state.level
+        return True
+
+
+class _ConsoleGateFilter(logging.Filter):
+    """Drops records tagged for console suppression."""
+
+    def __init__(self) -> None:
+        super().__init__(name="console-gate")
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        """Decide whether a record reaches the console.
+
+        Args:
+            record: Record being emitted.
+
+        Returns:
+            ``False`` when the record was created while the console was quiet.
+        """
+        return not getattr(record, "console_suppressed", False)
 
 
 class TranscriptFilter(logging.Filter):
@@ -122,12 +187,39 @@ class LoggingService:
         log_file: Path,
         error_file: Path | None,
         handlers: tuple[logging.Handler, ...],
+        suppression: _ConsoleSuppression,
     ) -> None:
         self._listener = listener
         self._log_file = log_file
         self._error_file = error_file
         self._handlers = handlers
+        self._suppression = suppression
         self._closed = False
+
+    @contextlib.contextmanager
+    def quiet_console(self, level: int = logging.WARNING) -> Iterator[None]:
+        """Hide low-severity console output for the duration of a block.
+
+        Live console output - a level meter redrawing with carriage returns -
+        is destroyed by log lines arriving in the middle of it. Silencing the
+        console while such a display is active keeps the terminal readable.
+
+        The **file log is unaffected**: records are tagged, not dropped, so
+        everything is still written to disk.
+
+        Args:
+            level: Records below this level are hidden from the console.
+
+        Yields:
+            Nothing. The previous threshold is restored on exit, including
+            when the block raises.
+        """
+        previous = self._suppression.level
+        self._suppression.level = level
+        try:
+            yield
+        finally:
+            self._suppression.level = previous
 
     # -- construction ------------------------------------------------------
     @classmethod
@@ -198,12 +290,18 @@ class LoggingService:
         console_handler.setLevel(logging.getLevelNamesMapping()[settings.console_level.value])
         console_handler.setFormatter(logging.Formatter(_CONSOLE_FORMAT, _CONSOLE_DATE_FORMAT))
         console_handler.addFilter(transcript_filter)
+        console_handler.addFilter(_ConsoleGateFilter())
         handlers.append(console_handler)
+
+        suppression = _ConsoleSuppression()
 
         # SimpleQueue is unbounded and lock-free on the producer side, which is
         # exactly what a real-time thread needs: logging can never block it.
         record_queue: queue.SimpleQueue[logging.LogRecord] = queue.SimpleQueue()
         queue_handler = logging.handlers.QueueHandler(record_queue)
+        # Tagging happens here, on the calling thread, because the listener
+        # emits records later - possibly after a live display has finished.
+        queue_handler.addFilter(_ConsoleTaggingFilter(suppression))
         root.addHandler(queue_handler)
 
         listener = logging.handlers.QueueListener(
@@ -222,6 +320,7 @@ class LoggingService:
             log_file=log_file,
             error_file=error_file,
             handlers=tuple(handlers),
+            suppression=suppression,
         )
 
     @staticmethod

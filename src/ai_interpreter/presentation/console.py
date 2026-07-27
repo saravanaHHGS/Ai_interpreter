@@ -7,14 +7,46 @@ formatting can be unit tested without running a command.
 
 from __future__ import annotations
 
+import math
+import shutil
 from collections.abc import Sequence
 from typing import Final
 
 from ai_interpreter.domain.entities import DeviceInfo
 
-__all__ = ["WIDTH", "format_device_table", "heading", "level_bar", "row"]
+__all__ = [
+    "WIDTH",
+    "format_device_table",
+    "heading",
+    "level_bar",
+    "row",
+    "terminal_width",
+]
 
 WIDTH: Final[int] = 78
+
+# Narrowest terminal the live meter still renders in without wrapping.
+_MIN_TERMINAL_WIDTH: Final[int] = 40
+_FALLBACK_TERMINAL_WIDTH: Final[int] = 80
+
+
+def terminal_width() -> int:
+    """Return the usable console width.
+
+    A line that exactly fills the terminal wraps on Windows, and a wrapped
+    line cannot be overwritten with a carriage return - the meter then leaves
+    a trail of half-drawn rows instead of updating in place. One column is
+    therefore held back.
+
+    Returns:
+        Usable width in characters, never below :data:`_MIN_TERMINAL_WIDTH`.
+    """
+    try:
+        columns = shutil.get_terminal_size(fallback=(_FALLBACK_TERMINAL_WIDTH, 24)).columns
+    except OSError:
+        columns = _FALLBACK_TERMINAL_WIDTH
+    return max(_MIN_TERMINAL_WIDTH, columns - 1)
+
 
 # Full block and light shade. Both are in every Windows console font, unlike
 # the fractional block characters a finer meter would need.
@@ -56,12 +88,11 @@ def level_bar(level: float, width: int = 30) -> str:
     Returns:
         A bar string of exactly ``width`` characters.
     """
+    width = max(1, width)
     if level <= 0.0:
         filled = 0
     else:
         # -60 dB (inaudible) to 0 dB (full scale) mapped across the bar.
-        import math
-
         decibels = 20.0 * math.log10(max(level, 1e-6))
         fraction = max(0.0, min(1.0, (decibels + 60.0) / 60.0))
         filled = round(fraction * width)

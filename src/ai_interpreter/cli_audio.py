@@ -35,6 +35,7 @@ from ai_interpreter.presentation.console import (
     heading,
     level_bar,
     row,
+    terminal_width,
 )
 
 __all__ = ["run_list_devices", "run_record"]
@@ -114,6 +115,7 @@ class _LiveMeter:
         self._level = 0.0
         self._probability = 0.0
         self._speaking = False
+        self._drawn_width = 0
 
     def update(self, level: float, probability: float, speaking: bool) -> None:
         """Record the newest values and redraw if due.
@@ -140,19 +142,27 @@ class _LiveMeter:
             self._draw()
 
     def _draw(self) -> None:
-        """Write the meter over the current console line."""
+        """Write the meter over the current console line.
+
+        The bar is sized from the terminal width rather than a fixed constant.
+        A line wider than the terminal wraps, and a wrapped line cannot be
+        overwritten with a carriage return - the meter would leave a trail of
+        half-drawn rows instead of updating in place.
+        """
+        width = terminal_width()
         status = "SPEAKING" if self._speaking else "silence "
-        line = (
-            f"  {level_bar(self._level)}  "
-            f"peak {self._level:5.3f}  speech {self._probability:4.2f}  {status}"
-        )
-        sys.stdout.write("\r" + line)
+        suffix = f"  peak {self._level:5.3f}  speech {self._probability:4.2f}  {status}"
+        bar_width = max(8, width - len(suffix) - 2)
+
+        line = f"  {level_bar(self._level, bar_width)}{suffix}"
+        sys.stdout.write("\r" + line[:width])
         sys.stdout.flush()
+        self._drawn_width = max(self._drawn_width, min(len(line), width))
 
     def finish(self) -> None:
         """Move off the meter line so later output is not overwritten."""
         if self._enabled:
-            sys.stdout.write("\r" + " " * (WIDTH + 12) + "\r")
+            sys.stdout.write("\r" + " " * self._drawn_width + "\r")
             sys.stdout.flush()
 
 
@@ -253,24 +263,28 @@ def run_record(container: Container, seconds: float, device_name: str | None) ->
     heading("Recording")
     print("  Speak normally. Say a few short sentences with pauses between them.\n")
 
+    # Log records arriving on stderr in the middle of a carriage-return meter
+    # destroy it. The console is silenced for the duration; the file log keeps
+    # every record, so nothing is lost.
     try:
-        raw_recorder.open()
-        processed_recorder.open()
-        session.start()
-        time.sleep(seconds)
+        with container.logging_service.quiet_console():
+            try:
+                raw_recorder.open()
+                processed_recorder.open()
+                session.start()
+                time.sleep(seconds)
+            except KeyboardInterrupt:
+                meter.finish()
+                print("\n  Interrupted.")
+            finally:
+                session.stop()
+                meter.finish()
+                with write_lock:
+                    raw_recorder.close()
+                    processed_recorder.close()
     except InterpreterError as exc:
-        meter.finish()
         print(f"\n{exc}\n", file=sys.stderr)
         return _EXIT_ERROR
-    except KeyboardInterrupt:
-        meter.finish()
-        print("\n  Interrupted.")
-    finally:
-        session.stop()
-        meter.finish()
-        with write_lock:
-            raw_recorder.close()
-            processed_recorder.close()
 
     if session.error is not None:
         print(f"\n  Capture failed: {session.error}\n", file=sys.stderr)
