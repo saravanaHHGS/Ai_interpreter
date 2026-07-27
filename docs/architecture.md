@@ -5,6 +5,69 @@ importantly, *why*. It is updated at the end of every phase.
 
 ---
 
+## 0. Hard constraints
+
+These are fixed requirements, not preferences. Every decision below is
+subordinate to them.
+
+| # | Constraint |
+|---|---|
+| C1 | **CPU only, permanently.** No CUDA, no GPU, now or later. Target: a typical Windows desktop with 2-4 cores. |
+| C2 | **Low memory.** Models are loaded lazily and only for languages in use. |
+| C3 | **Tamil ↔ English only.** Other languages may remain in the schema but are not tested or optimised for. |
+| C4 | **True streaming.** Translated speech must begin before the speaker finishes, driven by partial recognition and incremental translation. |
+| C5 | **Under 2 seconds end to end**, on CPU. |
+
+GPU adapters stay in the codebase behind their ports, so the option is never
+closed off - but the CPU path is the product, not a fallback.
+
+### C4 and C5 versus what has been measured
+
+Being direct, because the measurements are unambiguous and were taken on the
+target machine.
+
+**Whisper cannot stream on a CPU.** Its encoder always processes a padded
+30-second window, so a partial decode costs the same as a full one: 1.66 s for
+`base`, 6-10 s for the Tamil fine-tune. Emitting a partial every 500 ms would
+require running many full decodes per second.
+
+**Streaming architectures are fast enough, and available ones are not accurate
+enough.** Measured with sherpa-onnx streaming zipformer transducers on 10 s of
+the developer's speech:
+
+| Model | Real-time factor | Output |
+|---|---:|---|
+| zipformer 20M int8 | **0.053** | `U ART STOOD A REPLY IS HIS HER OWN` |
+| zipformer 70M int8 | **0.278** | `I ALLOYO WARLIO ARTS TOO LITTLE IT IS HERON` |
+| Whisper `base` (not streaming) | n/a | `Hi, hello, how are you? What's today your plan?` |
+
+The reference was *"Hi, hello, how are you? What's today your plan?"*. The
+streaming models run 4-19x faster than real time on two cores, with partial
+results appearing while the audio is still arriving - the architecture works.
+They are trained on read audiobook English and fall apart on conversational,
+accented speech.
+
+**There is no free streaming Tamil model at all.** The zipformer catalogue
+covers English, Chinese and French. Tamil options are Whisper fine-tunes
+(cannot stream) or CTC models such as `vakyansh-wav2vec2-tamil` and
+`ai4bharat/indic-conformer-600m-multilingual`, which *can* stream in principle
+because CTC cost scales with input length, but are unvalidated here for both
+accuracy and speed.
+
+**A second, independent obstacle: word order.** Tamil is subject-object-verb;
+English is subject-verb-object. In `நான் நாளைக்கு சென்னைக்கு போகிறேன்` the verb
+arrives last, so an English translation emitted before it must be guessed and
+then revised. Revising text on screen is free; revising speech that has already
+been spoken is not. Any streaming design must therefore either lag until a
+syntactically committable prefix exists, or accept audible self-correction.
+
+**Consequence for C5.** Sub-2-second end-to-end is currently reachable for
+English input and not for Tamil input, because Tamil's only accurate model
+costs 6-10 s per utterance. The gap is a *model* gap, not an architecture gap,
+and closing it is tracked as open question 5 in section 12.
+
+---
+
 ## 1. The problem
 
 Translate live speech and deliver it into a meeting application with as little
@@ -313,13 +376,19 @@ opt-in adapters with a licence warning.
 
 ## 12. Known open questions
 
-| # | Question | Resolved in |
+| # | Question | Status |
 |---|---|---|
-| 1 | Is there a free Tamil TTS voice under ~500 ms on CPU? | Phase 6 |
-| 2 | Does a Tamil-fine-tuned Whisper beat base Whisper enough to justify it? | Phase 4 |
-| 3 | Does OpenVINO on Intel integrated graphics speed up the encoder usefully? | Phase 4 |
-| 4 | What is the real measured EOU→FTS on `cpu_low`? | Phase 10 |
+| 1 | Is there a free Tamil TTS voice under ~500 ms on CPU? | Open — Phase 6. Now **mandatory**, since English→Tamil is in scope |
+| 2 | Does a Tamil-fine-tuned Whisper beat base Whisper enough to justify it? | **Answered, Phase 4.** Yes, decisively: ~80% word error → ~0-8% |
+| 3 | Does OpenVINO on Intel integrated graphics speed up the encoder? | Open — Phase 10. Attacks the encoder, which is the measured bottleneck |
+| 4 | What is the real measured latency on `cpu_low`? | **Answered, Phase 4.** 350 ms endpoint + 1.66 s (English) or 6-10 s (Tamil) |
+| 5 | **Is there a streaming Tamil ASR model that is both accurate and fast enough on 2 cores?** | **Open, and the single blocker for constraints C4 and C5.** Candidates: `vakyansh-wav2vec2-tamil` (621k downloads) and `ai4bharat/indic-conformer-600m-multilingual` (67k). Both are CTC, so cost scales with input length; both need ONNX export and validation |
 
-These are tracked honestly rather than assumed away. Question 1 in particular
-has a designed fallback (on-screen captions), so a negative answer delays a
-feature rather than blocking the project.
+Question 5 is now the most important open item in the project. Everything else
+in the streaming design - partial recognition, incremental translation,
+sentence-chunked synthesis - is buildable on measured foundations. Tamil input
+is the one stage with no known model that is simultaneously accurate enough and
+fast enough.
+
+Question 1 has a designed fallback (on-screen captions), so a negative answer
+delays a feature rather than blocking the project. Question 5 does not have one.
