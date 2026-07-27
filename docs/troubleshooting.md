@@ -189,7 +189,127 @@ Total ceiling is `max_bytes × (backup_count + 1)` per log file.
 
 ---
 
+## Native libraries blocked by Windows Smart App Control
+
+### `An Application Control policy has blocked this file`
+
+Windows Smart App Control (or a WDAC policy) is enforced and is blocking an
+unsigned native DLL shipped inside a pip package. Check with:
+
+```powershell
+(Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\CI\Policy").VerifiedAndReputablePolicyState
+```
+
+`1` means enforced, `2` evaluation, `0` off.
+
+**Do not turn it off to work around this.** Smart App Control cannot be
+re-enabled once disabled without reinstalling Windows, and every library this
+project needs works under it.
+
+Known cases, both already handled:
+
+| Library | Effect | Handling |
+|---|---|---|
+| `hf_xet` | Model download fails | Detected automatically; falls back to plain HTTPS |
+| `pysilero-vad` | ggml DLLs blocked | Not used; Silero runs via ONNX Runtime instead |
+
+Verified working under enforcement: `onnxruntime`, `sounddevice`, `soundfile`,
+`soxr`, `ctranslate2`.
+
+If a *new* library is blocked, prefer an ONNX or pure-Python alternative
+rather than disabling the policy.
+
+---
+
 ## Audio (Phases 3 and 7)
+
+### No audio was captured at all
+
+```powershell
+.\run.ps1 --record 10
+```
+
+reports `Blocks captured 0`. Causes, in order of likelihood:
+
+1. Windows microphone privacy: Settings → Privacy & security → Microphone →
+   allow desktop apps.
+2. The device is in use exclusively by another application (Teams, Zoom).
+3. The device is disabled in Sound settings.
+
+### The signal is silent or very quiet
+
+`--record` reports a peak below 0.02. Raise the level in Sound settings →
+Recording → your microphone → Properties → Levels. If it is already at
+maximum, add gain in configuration:
+
+```yaml
+audio:
+  input:
+    gain_db: 10.0
+```
+
+Gain is applied after filtering and clips rather than wrapping, so an
+excessive value distorts instead of producing noise.
+
+### The signal clips
+
+Peak reaches 1.000. Lower the Windows recording level, or set a negative
+`audio.input.gain_db`. Clipped audio transcribes badly.
+
+### Audio was captured but no speech was detected
+
+The level was fine but the detector never triggered. Try, in order:
+
+1. Speak closer to the microphone. Silero is trained on speech, and distant
+   room audio scores low by design.
+2. Lower the threshold: `vad.threshold: 0.35`.
+3. Switch detectors for a comparison: `vad.provider: energy`.
+
+### The application cuts me off mid-sentence
+
+`vad.min_silence_ms` is too short. Raise it to 450–600. The cost is that every
+translation arrives correspondingly later — this setting is the largest single
+term in the latency budget.
+
+### It waits too long before responding
+
+Lower `vad.min_silence_ms` towards 250. Below about 200 ms, natural pauses
+between words start splitting sentences into fragments, which translate badly.
+
+### The first word is cut off
+
+`vad.pre_roll_ms` is too small. Raise it to 400. It costs nothing in latency —
+the audio is buffered continuously and used retroactively.
+
+### Blocks are being dropped
+
+`--record` reports a non-zero `Blocks dropped`. The machine could not keep up
+and audio was lost. Close other applications. If it persists, reduce
+`stt.cpu_threads` so the capture thread is not starved.
+
+### The wrong microphone is being used
+
+```powershell
+.\run.ps1 --list-devices
+```
+
+The `Would capture from` line shows the resolved device. Pin it explicitly:
+
+```yaml
+audio:
+  input:
+    device: "Internal Microphone"
+    host_api: WASAPI
+```
+
+The name is matched case-insensitively as a substring.
+
+### A device name looks truncated
+
+MME truncates device names to 31 characters, so
+`Internal Microphone (Conexant ISST Audio)` appears as
+`Internal Microphone (Conexant I`. This is why `audio.input.host_api` defaults
+to `WASAPI`. Do not copy a truncated MME name into configuration.
 
 ### `--check` shows no virtual cable
 

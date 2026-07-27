@@ -30,9 +30,17 @@ app:
 
 audio:
   input:
-    # null = Windows default recording device.
-    # Set to a device name substring, e.g. "USB Audio Device".
+    # null = best available recording device.
+    # Set to a device name substring, e.g. "Internal Microphone".
     device: null
+
+    # Windows exposes the same microphone through several host APIs.
+    # WASAPI is strongly preferred: it reports full device names, runs at a
+    # native 48 kHz and has the lowest latency. MME truncates device names to
+    # 31 characters, which silently breaks matching the `device` value above.
+    # null = automatic preference order (WASAPI, DirectSound, MME, WDM-KS).
+    host_api: WASAPI
+
     sample_rate: 48000
     channels: 1
     # Callback frame size. 20 ms is the sweet spot: small enough for low

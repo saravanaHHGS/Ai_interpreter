@@ -26,13 +26,14 @@ Or individually:
 
 | Gate | Status |
 |---|---|
-| `ruff format --check` | 34 files formatted |
+| `ruff format --check` | 65 files formatted |
 | `ruff check` | passing |
-| `mypy` (strict-leaning) | no issues in 24 source files |
-| `pytest` | **134 passed** |
+| `mypy` (strict-leaning) | no issues in 43 source files |
+| `pytest` | **289 passed** |
 
-Runtime: under 5 seconds for the whole suite. That is deliberate. A suite you
-run after every edit must be fast enough that you actually do.
+Runtime: under 10 seconds for the whole suite, with no microphone required.
+That is deliberate. A suite you run after every edit must be fast enough that
+you actually do.
 
 ---
 
@@ -82,6 +83,24 @@ The last two exist so continuous integration can skip them:
 | Paths | 12 | Root precedence, directory creation, user-profile isolation |
 | Secrets | 7 | Loading, redaction in `repr` |
 | Container + CLI | 15 | Full startup, profile override, all commands |
+| Audio buffers | 16 | Drop-oldest overflow, ordering, threaded producer/consumer |
+| DSP | 27 | Filter continuity across chunks, resampling ratios, gain, clipping |
+| Devices | 22 | Host API ranking, MME truncation matching, resolution failures |
+| Segmenter | 24 | Onset, endpoint, pre-roll, forced cuts, both regressions |
+| VAD and recording | 28 | Energy adaptation, WAV round-trip, registry validation |
+| Capture session | 15 | Full chain over a file, callbacks, threading, error handling |
+
+### Testing audio without audio hardware
+
+`WavFileSource` implements the same `AudioSource` port as the microphone, so
+`tests/integration/test_capture_session.py` exercises the entire capture chain
+— resampling, filtering, framing, detection, segmentation, the background
+thread — on a machine with no sound card, deterministically.
+
+The detector in those tests is a scripted fake returning speech for
+pre-arranged frame ranges. That makes the expected output exact rather than
+approximate. The neural detector is verified separately; the integration tests
+verify the plumbing.
 
 ---
 

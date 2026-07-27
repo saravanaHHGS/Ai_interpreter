@@ -40,15 +40,29 @@ from ai_interpreter.application.services.profile_selector import (
     ProfileSelection,
     ProfileSelector,
 )
-from ai_interpreter.domain.entities import HardwareInfo
+from ai_interpreter.application.services.utterance_segmenter import UtteranceSegmenter
+from ai_interpreter.domain.entities import DeviceInfo, HardwareInfo
+from ai_interpreter.domain.errors import ConfigurationError
+from ai_interpreter.domain.ports import VoiceActivityDetector
+from ai_interpreter.domain.value_objects import DeviceKind, LanguageCode, SampleRate
+from ai_interpreter.infrastructure.audio.capture.microphone import MicrophoneSource
+from ai_interpreter.infrastructure.audio.devices import SounddeviceDeviceEnumerator
+from ai_interpreter.infrastructure.audio.dsp import AudioPreprocessor
+from ai_interpreter.infrastructure.audio.vad.energy import EnergyVad
+from ai_interpreter.infrastructure.audio.vad.silero import SileroVad
 from ai_interpreter.infrastructure.config.loader import ConfigLoader, ConfigLoadReport
 from ai_interpreter.infrastructure.config.secrets import Secrets
 from ai_interpreter.infrastructure.config.settings import AppSettings, Profile
 from ai_interpreter.infrastructure.logging.setup import LoggingService
+from ai_interpreter.infrastructure.models.hf_repository import HuggingFaceModelRepository
+from ai_interpreter.infrastructure.models.registry import ModelRegistry
 from ai_interpreter.infrastructure.paths import ApplicationPaths
 from ai_interpreter.infrastructure.system.hardware import HardwareProbe
 
 __all__ = ["Container"]
+
+# Registry identifier of the neural voice activity detector.
+_SILERO_MODEL_ID = "silero-vad"
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,6 +77,9 @@ class Container:
         config_report: Provenance of the configuration.
         secrets: Credentials loaded from ``.env``.
         logging_service: Owner of the logging configuration.
+        devices: Audio endpoint enumerator.
+        models: Declared model catalogue.
+        model_repository: Model download and cache.
     """
 
     paths: ApplicationPaths
@@ -72,6 +89,9 @@ class Container:
     config_report: ConfigLoadReport
     secrets: Secrets
     logging_service: LoggingService
+    devices: SounddeviceDeviceEnumerator
+    models: ModelRegistry
+    model_repository: HuggingFaceModelRepository
 
     @classmethod
     def build(
@@ -130,6 +150,11 @@ class Container:
         # 6. Secrets
         secrets = Secrets.load(paths.root / ".env")
 
+        # 7. Adapters. Construction is cheap and side-effect free: no device
+        #    is opened and no model is downloaded until something is used.
+        models = ModelRegistry.load(paths.config_dir / "models.yaml")
+        token = secrets.hf_token.get_secret_value() if secrets.hf_token else None
+
         return cls(
             paths=paths,
             hardware=hardware,
@@ -138,6 +163,13 @@ class Container:
             config_report=config_report,
             secrets=secrets,
             logging_service=logging_service,
+            devices=SounddeviceDeviceEnumerator(preferred_host_api=settings.audio.input.host_api),
+            models=models,
+            model_repository=HuggingFaceModelRepository(
+                cache_dir=paths.models_dir,
+                token=token,
+                registry=tuple(models),
+            ),
         )
 
     @staticmethod
@@ -158,6 +190,116 @@ class Container:
         if configured.is_absolute():
             return configured
         return paths.root / configured
+
+    # -- audio factories ---------------------------------------------------
+    #
+    # These are the only place the audio stack is assembled. Everything they
+    # build is chosen from configuration, so switching to the energy detector
+    # or a different microphone changes one YAML value and no code.
+    def resolve_input_device(self, name_override: str | None = None) -> DeviceInfo:
+        """Resolve which microphone to open.
+
+        Args:
+            name_override: Device name fragment from the command line, taking
+                precedence over configuration.
+
+        Returns:
+            The endpoint to capture from.
+
+        Raises:
+            DeviceNotFoundError: If nothing matches, or the machine has no
+                capture device.
+        """
+        configured = name_override or self.settings.audio.input.device
+        return self.devices.resolve(configured, DeviceKind.INPUT)
+
+    def create_microphone_source(self, device: DeviceInfo | None = None) -> MicrophoneSource:
+        """Build a microphone capture source.
+
+        Args:
+            device: Endpoint to open, or ``None`` to resolve from
+                configuration.
+
+        Returns:
+            An unopened capture source; call ``start()`` to begin.
+        """
+        audio_input = self.settings.audio.input
+        return MicrophoneSource(
+            device=device or self.resolve_input_device(),
+            sample_rate=SampleRate(audio_input.sample_rate),
+            frame_ms=audio_input.frame_ms,
+        )
+
+    def create_preprocessor(self, input_rate: SampleRate) -> AudioPreprocessor:
+        """Build the resample, filter and gain chain.
+
+        Args:
+            input_rate: Rate audio arrives at, which may differ from the
+                configured rate if the device negotiated another.
+
+        Returns:
+            The configured preprocessor.
+        """
+        processing = self.settings.audio.processing
+        return AudioPreprocessor(
+            input_rate=input_rate,
+            output_rate=SampleRate(processing.target_sample_rate),
+            high_pass_hz=processing.high_pass_hz,
+            gain_db=self.settings.audio.input.gain_db,
+        )
+
+    def create_vad(self) -> VoiceActivityDetector:
+        """Build the voice activity detector named in configuration.
+
+        Downloads the Silero model on first use. The energy detector needs no
+        model and is the documented fallback when downloading is impossible.
+
+        Returns:
+            The detector, already warmed up.
+
+        Raises:
+            ConfigurationError: If the configured provider is unknown.
+            ModelDownloadError: If the Silero model cannot be obtained.
+            ModelLoadError: If the model cannot be loaded.
+        """
+        provider = self.settings.vad.provider.strip().lower()
+
+        if provider == "energy":
+            detector: VoiceActivityDetector = EnergyVad()
+        elif provider == "silero":
+            descriptor = self.models.get(_SILERO_MODEL_ID)
+            model_path = self.model_repository.ensure_file(descriptor, descriptor.files[0])
+            detector = SileroVad(model_path=model_path, num_threads=1)
+        else:
+            msg = f"Unknown vad.provider {self.settings.vad.provider!r}. Valid: silero, energy"
+            raise ConfigurationError(msg)
+
+        warmup = getattr(detector, "warmup", None)
+        if callable(warmup):
+            warmup()
+        return detector
+
+    def create_segmenter(self, sample_rate: SampleRate | None = None) -> UtteranceSegmenter:
+        """Build the utterance state machine from configuration.
+
+        Args:
+            sample_rate: Rate of the frames it will receive, or ``None`` to
+                use the configured model rate.
+
+        Returns:
+            The configured segmenter.
+        """
+        vad = self.settings.vad
+        rate = sample_rate or SampleRate(self.settings.audio.processing.target_sample_rate)
+        return UtteranceSegmenter(
+            sample_rate=rate,
+            threshold=vad.threshold,
+            min_speech_ms=vad.min_speech_ms,
+            min_silence_ms=vad.min_silence_ms,
+            pre_roll_ms=vad.pre_roll_ms,
+            max_utterance_ms=vad.max_utterance_ms,
+            language=LanguageCode(self.settings.app.language_pair.source),
+        )
 
     def shutdown(self) -> None:
         """Release everything the container owns, in reverse build order."""

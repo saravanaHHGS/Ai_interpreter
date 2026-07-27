@@ -135,6 +135,7 @@ class AudioInputSection(BaseModel):
     model_config = _STRICT
 
     device: str | None
+    host_api: str | None
     sample_rate: int
     channels: int = Field(ge=1, le=2)
     frame_ms: int

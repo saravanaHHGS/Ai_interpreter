@@ -36,6 +36,7 @@ import yaml
 
 from ai_interpreter import __version__
 from ai_interpreter.app.container import Container
+from ai_interpreter.cli_audio import run_list_devices, run_record
 from ai_interpreter.domain.errors import InterpreterError
 from ai_interpreter.infrastructure.config.settings import Profile
 from ai_interpreter.infrastructure.system.audio_endpoints import list_windows_audio_endpoints
@@ -58,6 +59,11 @@ _REQUIRED_PACKAGES: Final[tuple[tuple[str, str], ...]] = (
     ("yaml", "Phase 2 - configuration files"),
     ("platformdirs", "Phase 2 - user directory resolution"),
     ("psutil", "Phase 2 - hardware detection"),
+    ("sounddevice", "Phase 3 - microphone capture"),
+    ("soundfile", "Phase 3 - WAV recording"),
+    ("soxr", "Phase 3 - sample rate conversion"),
+    ("onnxruntime", "Phase 3 - voice activity detection"),
+    ("huggingface_hub", "Phase 3 - model download"),
 )
 
 # External programs. Missing entries are warnings, not failures: none of them
@@ -131,8 +137,10 @@ def _build_parser() -> argparse.ArgumentParser:
         epilog=(
             "examples:\n"
             "  python -m ai_interpreter --check\n"
+            "  python -m ai_interpreter --list-devices\n"
+            "  python -m ai_interpreter --record 10\n"
+            '  python -m ai_interpreter --record 10 --device "Internal Microphone"\n'
             "  python -m ai_interpreter --print-config\n"
-            "  python -m ai_interpreter --check --profile cpu_low\n"
         ),
     )
     parser.add_argument(
@@ -149,6 +157,25 @@ def _build_parser() -> argparse.ArgumentParser:
         "--print-config",
         action="store_true",
         help="print the fully merged, validated configuration as YAML",
+    )
+    parser.add_argument(
+        "--list-devices",
+        action="store_true",
+        help="list every audio input and output device",
+    )
+    parser.add_argument(
+        "--record",
+        type=float,
+        metavar="SECONDS",
+        default=None,
+        help="record from the microphone, detect speech, and save test WAV files",
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        metavar="NAME",
+        default=None,
+        help="input device name fragment, overriding audio.input.device",
     )
     parser.add_argument(
         "--profile",
@@ -401,12 +428,21 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _run_check(container)
         if args.print_config:
             return _run_print_config(container)
+        if args.list_devices:
+            return run_list_devices(container)
+        if args.record is not None:
+            if args.record <= 0:
+                print("--record needs a positive number of seconds.", file=sys.stderr)
+                return _EXIT_FAILED_CHECK
+            return run_record(container, args.record, args.device)
 
         print(f"AI Interpreter {__version__}")
         print(f"Profile: {container.selection.profile.value} ({container.selection.reason})")
         print()
         print("The desktop interface is built in Phase 8. Available now:")
         print("  python -m ai_interpreter --check          verify the environment")
+        print("  python -m ai_interpreter --list-devices   list audio devices")
+        print("  python -m ai_interpreter --record 10      test the microphone")
         print("  python -m ai_interpreter --print-config   show effective settings")
         print("  python -m ai_interpreter --help           full option list")
         return _EXIT_OK

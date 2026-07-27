@@ -176,16 +176,37 @@ class AudioSource(Protocol):
 
 @runtime_checkable
 class VoiceActivityDetector(Protocol):
-    """Decides whether a frame contains speech."""
+    """Decides whether a frame contains speech.
+
+    Neural detectors impose an exact input size - Silero v5 accepts precisely
+    512 samples at 16 kHz and nothing else. That constraint is exposed here
+    rather than hard-coded in the capture pipeline, so the frame assembler
+    asks the detector what it needs. Swapping in a detector with different
+    requirements then changes no other code.
+    """
+
+    @property
+    def required_frame_samples(self) -> int:
+        """Exact number of samples each call must be given."""
+        ...
+
+    @property
+    def sample_rate(self) -> SampleRate:
+        """Sample rate the detector requires."""
+        ...
 
     def speech_probability(self, frame: AudioFrame) -> float:
         """Probability that a frame contains speech.
 
         Args:
-            frame: Frame to score.
+            frame: Frame of exactly :attr:`required_frame_samples` samples at
+                :attr:`sample_rate`.
 
         Returns:
             Probability in ``[0.0, 1.0]``.
+
+        Raises:
+            ValueError: If the frame size or sample rate is wrong.
         """
         ...
 
@@ -530,7 +551,7 @@ class ModelRepository(Protocol):
         ...
 
     def ensure(self, descriptor: ModelDescriptor) -> Path:
-        """Download a model if needed and return its local path.
+        """Download a model if needed and return its local directory.
 
         Args:
             descriptor: Model to obtain.
@@ -540,6 +561,25 @@ class ModelRepository(Protocol):
 
         Raises:
             ModelDownloadError: If download or verification fails.
+        """
+        ...
+
+    def ensure_file(self, descriptor: ModelDescriptor, filename: str) -> Path:
+        """Download one file from a model repository and return its path.
+
+        Single-file models such as the VAD do not need a whole repository
+        snapshot, and downloading one 2 MB file instead of every quantised
+        variant matters on a metered connection.
+
+        Args:
+            descriptor: Model the file belongs to.
+            filename: Repository-relative path, e.g. ``"onnx/model.onnx"``.
+
+        Returns:
+            Local path of the downloaded file.
+
+        Raises:
+            ModelDownloadError: If download fails.
         """
         ...
 

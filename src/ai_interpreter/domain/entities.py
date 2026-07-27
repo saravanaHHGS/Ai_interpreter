@@ -434,6 +434,8 @@ class ModelDescriptor:
         languages: Language codes the model supports.
         size_mb: Approximate on-disk size, shown before download.
         runtime: Runtime that executes it, e.g. ``"ctranslate2"``, ``"onnx"``.
+        files: Repository-relative files required, e.g. ``("onnx/model.onnx",)``.
+            Empty means the whole repository snapshot is needed.
         local_path: Resolved path once downloaded, ``None`` beforehand.
     """
 
@@ -444,6 +446,7 @@ class ModelDescriptor:
     languages: tuple[str, ...]
     size_mb: int
     runtime: str
+    files: tuple[str, ...] = ()
     local_path: Path | None = field(default=None)
 
     def supports(self, language: LanguageCode) -> bool:

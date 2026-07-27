@@ -1,0 +1,23 @@
+# ===========================================================================
+# Model registry.
+#
+# Every model the application can download is declared here with an exact
+# repository revision. Pinning a commit rather than tracking a branch means an
+# upstream repository cannot silently change the weights you are running - a
+# supply-chain safeguard with no downside, since a deliberate upgrade is a
+# one-line edit here.
+#
+# `files` lists only what is actually needed. The Silero repository publishes
+# eight quantised variants; we download one.
+# ===========================================================================
+
+models:
+  silero-vad:
+    task: vad
+    repo_id: onnx-community/silero-vad
+    revision: e71cae966052b992a7eca6b17738916ce0eca4ec
+    languages: ["*"]          # acoustic model, language independent
+    size_mb: 3
+    runtime: onnx
+    files:
+      - onnx/model.onnx

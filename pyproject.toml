@@ -29,12 +29,19 @@ dynamic = ["version"]
 # Audio (Phase 3), STT (Phase 4), MT (Phase 5), TTS (Phase 6) and UI (Phase 8)
 # dependencies are added in their own phases so every phase stays installable.
 dependencies = [
+    # Phase 2 - foundation
     "numpy>=2.1,<3",
     "pydantic>=2.9,<3",
     "pydantic-settings>=2.6,<3",
     "PyYAML>=6.0.2,<7",
     "platformdirs>=4.3,<5",
     "psutil>=6.1,<8",
+    # Phase 3 - audio capture
+    "sounddevice>=0.5,<1",     # PortAudio bindings; ships the binary, no compiler needed
+    "soundfile>=0.13,<1",      # WAV read/write for test recordings
+    "soxr>=0.5,<2",            # stateful streaming resampling, correct across chunks
+    "onnxruntime>=1.20,<2",    # runs Silero VAD; reused for TTS in Phase 6
+    "huggingface-hub>=0.27,<2",  # model download with revision pinning
 ]
 
 [project.optional-dependencies]
@@ -119,8 +126,18 @@ no_implicit_optional = true
 strict_equality = true
 show_error_codes = true
 
+# Native audio and ML libraries ship no type stubs. Silencing the import
+# error is safe because each is used behind a port, so the untyped surface is
+# confined to a single adapter class that its own tests cover.
 [[tool.mypy.overrides]]
-module = ["psutil.*"]
+module = [
+    "psutil.*",
+    "sounddevice.*",
+    "soundfile.*",
+    "soxr.*",
+    "onnxruntime.*",
+    "hf_xet.*",
+]
 ignore_missing_imports = true
 
 # ---------------------------------------------------------------------------
