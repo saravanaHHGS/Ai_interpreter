@@ -1,0 +1,32 @@
+# ===========================================================================
+# Profile: cpu_high
+#
+# Target: 6+ physical core desktop CPU, no usable discrete GPU.
+# Enough cores to overlap pipeline stages and run a larger acoustic model.
+# ===========================================================================
+
+stt:
+  model: medium
+  device: cpu
+  compute_type: int8
+  cpu_threads: 6
+  beam_size: 1
+  streaming: true
+  chunk_ms: 1000
+
+translation:
+  provider: indictrans2
+  device: cpu
+  compute_type: int8
+  beam_size: 2
+
+tts:
+  provider: piper
+  device: cpu
+
+pipeline:
+  inference_lane: parallel
+  queue_maxsize: 4
+
+vad:
+  min_silence_ms: 320

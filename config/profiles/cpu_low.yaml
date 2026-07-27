@@ -1,0 +1,42 @@
+# ===========================================================================
+# Profile: cpu_low
+#
+# Target: 2-4 core laptop CPU, no discrete GPU.
+# This is the profile your Intel i5-7200U (2 cores / 4 threads) selects.
+#
+# Strategy: small quantised models, one model running at a time, streaming
+# transcription so that end-of-utterance latency is the cost of the final
+# audio chunk rather than the whole sentence.
+#
+# Only keys that DIFFER from config/default.yaml belong here.
+# ===========================================================================
+
+stt:
+  model: small
+  device: cpu
+  compute_type: int8
+  # Leave headroom: 2 physical cores must also serve audio capture and the UI.
+  cpu_threads: 2
+  beam_size: 1
+  streaming: true
+  chunk_ms: 1000
+
+translation:
+  provider: indictrans2
+  device: cpu
+  compute_type: int8
+  beam_size: 1
+
+tts:
+  # Piper is the fastest CPU text-to-speech available and its models are
+  # ~60 MB VITS networks - roughly 10x real-time on this class of CPU.
+  provider: piper
+  device: cpu
+
+pipeline:
+  # One inference at a time. Oversubscribing 2 cores makes everything slower.
+  inference_lane: serial
+  queue_maxsize: 2
+
+vad:
+  min_silence_ms: 350

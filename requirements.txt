@@ -1,0 +1,14 @@
+# ---------------------------------------------------------------------------
+# Runtime installation for AI Interpreter.
+#
+# Dependency RANGES are declared once, in pyproject.toml [project.dependencies].
+# This file installs the project itself in editable mode, which pulls those
+# dependencies in. Keeping the list in exactly one place means the two files
+# can never disagree with each other.
+#
+#   Install:  pip install -r requirements.txt
+#
+# For a byte-for-byte reproducible install (CI, another machine, the Phase 12
+# installer build) use the exact pins in requirements.lock.txt instead.
+# ---------------------------------------------------------------------------
+-e .

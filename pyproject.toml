@@ -1,0 +1,150 @@
+[build-system]
+requires = ["setuptools>=75.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+# ---------------------------------------------------------------------------
+# Project metadata
+#
+# pyproject.toml is the SINGLE SOURCE OF TRUTH for runtime dependencies.
+# requirements.txt simply installs this project, so the two can never drift.
+# ---------------------------------------------------------------------------
+[project]
+name = "ai-interpreter"
+description = "Real-time speech-to-speech interpreter for Windows meeting applications."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [{ name = "Hike Health GS" }]
+keywords = ["speech-translation", "asr", "tts", "real-time", "interpreter"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Win32 (MS Windows)",
+    "Intended Audience :: End Users/Desktop",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Sound/Audio :: Speech",
+]
+dynamic = ["version"]
+
+# Phase 2 foundation dependencies only.
+# Audio (Phase 3), STT (Phase 4), MT (Phase 5), TTS (Phase 6) and UI (Phase 8)
+# dependencies are added in their own phases so every phase stays installable.
+dependencies = [
+    "numpy>=2.1,<3",
+    "pydantic>=2.9,<3",
+    "pydantic-settings>=2.6,<3",
+    "PyYAML>=6.0.2,<7",
+    "platformdirs>=4.3,<5",
+    "psutil>=6.1,<8",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3,<9",
+    "pytest-cov>=6.0,<8",
+    "pytest-asyncio>=0.24,<2",
+    "ruff>=0.8,<1",
+    "mypy>=1.13,<2",
+    "types-PyYAML>=6.0.2,<7",
+]
+
+[project.scripts]
+ai-interpreter = "ai_interpreter.cli:main"
+
+[project.urls]
+Documentation = "https://github.com/hikehealth/ai-interpreter/tree/main/docs"
+
+# ---------------------------------------------------------------------------
+# Packaging - "src layout" prevents accidentally importing the working
+# directory instead of the installed package.
+# ---------------------------------------------------------------------------
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.dynamic]
+version = { attr = "ai_interpreter.__version__" }
+
+# ---------------------------------------------------------------------------
+# Ruff - linter + formatter (replaces flake8, isort, black, pyupgrade)
+# ---------------------------------------------------------------------------
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # import sorting
+    "N",    # PEP8 naming
+    "UP",   # pyupgrade
+    "B",    # bugbear (likely bugs)
+    "A",    # builtin shadowing
+    "C4",   # comprehensions
+    "SIM",  # simplifications
+    "RET",  # return statements
+    "PTH",  # prefer pathlib over os.path
+    "RUF",  # ruff-specific
+]
+ignore = [
+    "RUF012", # mutable class attrs need ClassVar - noisy with pydantic
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]
+
+[tool.ruff.format]
+quote-style = "double"
+docstring-code-format = true
+
+# ---------------------------------------------------------------------------
+# mypy - static type checking
+# ---------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.12"
+mypy_path = "src"
+packages = ["ai_interpreter"]
+plugins = ["pydantic.mypy"]
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_return_any = true
+no_implicit_optional = true
+strict_equality = true
+show_error_codes = true
+
+[[tool.mypy.overrides]]
+module = ["psutil.*"]
+ignore_missing_imports = true
+
+# ---------------------------------------------------------------------------
+# pytest
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-ra --strict-markers --strict-config"
+markers = [
+    "unit: fast, isolated tests with no external dependencies",
+    "integration: tests that wire multiple components together",
+    "performance: latency and throughput benchmarks",
+    "stress: long-running load tests",
+    "requires_audio: needs a real audio device",
+    "requires_model: needs downloaded model weights",
+]
+asyncio_mode = "strict"
+
+[tool.coverage.run]
+source = ["src/ai_interpreter"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true

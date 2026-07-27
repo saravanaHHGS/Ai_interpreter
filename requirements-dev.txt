@@ -1,0 +1,8 @@
+# ---------------------------------------------------------------------------
+# Development installation: runtime dependencies plus test / lint / type tools.
+#
+#   Install:  pip install -r requirements-dev.txt
+#
+# The "[dev]" extra is declared in pyproject.toml [project.optional-dependencies].
+# ---------------------------------------------------------------------------
+-e .[dev]

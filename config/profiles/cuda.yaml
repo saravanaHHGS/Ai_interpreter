@@ -1,0 +1,38 @@
+# ===========================================================================
+# Profile: cuda
+#
+# Target: NVIDIA GPU with >= 6 GB VRAM (RTX 3060 class and above).
+# Full-quality models, overlapping pipeline stages, fp16 inference.
+#
+# Nothing in the application changes when you move to this profile - only the
+# adapters that the composition root builds. That is the entire point of the
+# ports-and-adapters architecture.
+# ===========================================================================
+
+stt:
+  model: large-v3-turbo
+  device: cuda
+  compute_type: float16
+  cpu_threads: 4
+  beam_size: 1
+  streaming: true
+  chunk_ms: 800
+
+translation:
+  provider: indictrans2
+  device: cuda
+  compute_type: float16
+  beam_size: 4
+
+tts:
+  # Kokoro-82M: Apache-2.0, natural voices, roughly 50x real-time on GPU.
+  provider: kokoro
+  device: cuda
+  sample_rate: 24000
+
+pipeline:
+  inference_lane: parallel
+  queue_maxsize: 4
+
+vad:
+  min_silence_ms: 300

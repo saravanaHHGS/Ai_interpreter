@@ -1,0 +1,150 @@
+# ===========================================================================
+# AI Interpreter - base configuration
+#
+# This file is the single source of truth for every default value in the
+# application. There are no hard-coded settings in the Python code: if a value
+# is missing here, the application refuses to start rather than guessing.
+#
+# Layering order (later layers override earlier ones):
+#   1. config/default.yaml            <- this file
+#   2. config/profiles/<profile>.yaml <- hardware tier (auto-detected)
+#   3. %APPDATA%/ai-interpreter/config.yaml  <- your personal overrides
+#   4. environment variables          <- AI_INTERPRETER__STT__MODEL=medium
+#
+# Unknown keys are rejected, so a typo fails loudly instead of being ignored.
+# ===========================================================================
+
+app:
+  name: "AI Interpreter"
+
+  # auto | cpu_low | cpu_high | cuda
+  # "auto" inspects the machine at startup and picks a profile from
+  # config/profiles/. Set it explicitly to force a tier.
+  profile: auto
+
+  # The direction translated in Phase 7's one-directional mode:
+  # you speak `source`, the meeting hears `target`.
+  language_pair:
+    source: ta
+    target: en
+
+audio:
+  input:
+    # null = Windows default recording device.
+    # Set to a device name substring, e.g. "USB Audio Device".
+    device: null
+    sample_rate: 48000
+    channels: 1
+    # Callback frame size. 20 ms is the sweet spot: small enough for low
+    # latency, large enough that PortAudio is not woken up excessively on a
+    # 2-core CPU.
+    frame_ms: 20
+    gain_db: 0.0
+
+  output:
+    # null = Windows default playback device.
+    # In Phase 7 this becomes "CABLE Input (VB-Audio Virtual Cable)".
+    device: null
+    sample_rate: 48000
+    # Absorbs scheduling jitter so the virtual microphone never underruns.
+    jitter_buffer_ms: 60
+    # Play a copy of the translated speech to your own headphones so you can
+    # hear what the meeting hears.
+    monitor: false
+    monitor_device: null
+
+  processing:
+    # Every speech model in this project expects 16 kHz mono.
+    target_sample_rate: 16000
+    denoise: false
+    # Removes rumble, HVAC hum and desk thumps below this frequency.
+    high_pass_hz: 80
+
+vad:
+  provider: silero
+  # Speech probability above which a frame counts as speech.
+  threshold: 0.5
+  # Ignore blips shorter than this (keyboard clicks, door slams).
+  min_speech_ms: 250
+  # Silence needed to declare the utterance finished. This is the single
+  # largest fixed cost in the latency budget - lower it for snappier output,
+  # raise it if the app cuts you off mid-sentence.
+  min_silence_ms: 350
+  # Audio kept from *before* speech was detected, so the first syllable is
+  # never clipped.
+  pre_roll_ms: 300
+  # Hard cut for someone who never pauses.
+  max_utterance_ms: 12000
+
+stt:
+  provider: faster_whisper
+  model: small
+  device: cpu
+  compute_type: int8
+  cpu_threads: 2
+  # Greedy decoding. Beam search costs 2-4x more time for a small accuracy
+  # gain that real-time interpretation cannot afford.
+  beam_size: 1
+  # Transcribe while the speaker is still talking, so only the final chunk
+  # remains to decode at end-of-utterance.
+  streaming: true
+  chunk_ms: 1000
+  partial_interval_ms: 300
+  # null = models/ inside the project directory.
+  download_root: null
+
+translation:
+  provider: indictrans2
+  model: ai4bharat/indictrans2-indic-en-dist-200M
+  device: cpu
+  compute_type: int8
+  beam_size: 1
+  max_input_chars: 512
+  cache:
+    enabled: true
+    max_entries: 5000
+    persist: false
+
+tts:
+  provider: piper
+  # null = the provider's default voice for the target language.
+  voice: null
+  device: cpu
+  speed: 1.0
+  sample_rate: 22050
+  # Emit audio sentence by sentence instead of waiting for the whole reply.
+  streaming: true
+  sentence_split: true
+
+pipeline:
+  # Deliberately tiny. A long queue does not buy throughput in a live
+  # conversation, it only adds latency.
+  queue_maxsize: 2
+  # drop_oldest | drop_newest | block
+  drop_policy: drop_oldest
+  # auto | serial | parallel
+  # "serial" runs one model at a time - correct on a 2-core CPU, where three
+  # models fighting for two cores is slower than running them in sequence.
+  inference_lane: auto
+  max_retries: 1
+  retry_backoff_ms: 250
+  utterance_timeout_ms: 15000
+
+logging:
+  # Root level; the handlers below filter further.
+  level: DEBUG
+  console_level: INFO
+  file_level: DEBUG
+  directory: logs
+  max_bytes: 10485760      # 10 MB per file
+  backup_count: 7
+  error_log: true
+
+privacy:
+  # Meeting audio is sensitive. Everything here is off by default.
+  # When false, transcript and translation TEXT never reaches the log files -
+  # only durations, confidences and byte counts.
+  log_transcripts: false
+  persist_history: false
+  cache_translations: true
+  telemetry: false
