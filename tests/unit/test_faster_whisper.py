@@ -401,11 +401,43 @@ class TestLanguageResolution:
 
 
 class TestSupportedLanguages:
-    """Language capability reporting."""
+    """Language capability reporting and enforcement."""
 
     @pytest.mark.parametrize("code", ["ta", "en", "hi", "te", "ml"])
-    def test_supports_the_required_languages(self, code: str) -> None:
+    def test_generic_model_supports_the_required_languages(self, code: str) -> None:
         assert _recognizer(FakeWhisperModel()).supports(LanguageCode(code))
+
+    def test_a_fine_tune_reports_only_its_own_language(self) -> None:
+        recognizer = _recognizer(
+            FakeWhisperModel(),
+            language=LanguageCode("ta"),
+            supported_languages=frozenset({"ta"}),
+        )
+
+        assert recognizer.supports(LanguageCode("ta"))
+        assert not recognizer.supports(LanguageCode("en"))
+
+    def test_a_fine_tune_refuses_another_language(self) -> None:
+        # Asking a Tamil fine-tune for English does not fail inside the model;
+        # it returns confident nonsense. Refusing is the only safe behaviour.
+        recognizer = _recognizer(
+            FakeWhisperModel([FakeSegment("Hi", 0.0, 1.0)]),
+            language=LanguageCode("en"),
+            supported_languages=frozenset({"ta"}),
+        )
+
+        with pytest.raises(TranscriptionError, match="does not support English"):
+            recognizer.transcribe(_utterance())
+
+    def test_the_error_names_the_supported_languages(self) -> None:
+        recognizer = _recognizer(
+            FakeWhisperModel(),
+            language=LanguageCode("en"),
+            supported_languages=frozenset({"ta"}),
+        )
+
+        with pytest.raises(TranscriptionError, match="It supports: ta"):
+            recognizer.transcribe(_utterance())
 
 
 class TestStreaming:

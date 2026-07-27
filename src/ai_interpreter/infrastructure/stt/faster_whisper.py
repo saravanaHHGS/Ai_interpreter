@@ -198,6 +198,11 @@ class FasterWhisperRecognizer:
         language: Language to decode, or ``None`` to auto-detect. Passing the
             known language is both faster and more reliable than detection.
         options: Decoding parameters.
+        supported_languages: Language codes this checkpoint handles, or
+            ``None`` for the full multilingual set. Fine-tuned checkpoints
+            are usually single-language, and asking one for another language
+            produces confident nonsense rather than an error - so the
+            restriction is declared in the model registry and enforced here.
     """
 
     def __init__(
@@ -209,6 +214,7 @@ class FasterWhisperRecognizer:
         cpu_threads: int = 2,
         language: LanguageCode | None = None,
         options: WhisperDecodeOptions | None = None,
+        supported_languages: frozenset[str] | None = None,
     ) -> None:
         self._model_dir = model_dir
         self._model_id = model_id
@@ -217,6 +223,7 @@ class FasterWhisperRecognizer:
         self._cpu_threads = cpu_threads
         self._language = language
         self._options = options or WhisperDecodeOptions()
+        self._supported = supported_languages or _SUPPORTED_LANGUAGES
         self._model: Any = None
         self._utterances_decoded = 0
         self._total_decode_ms = 0.0
@@ -244,6 +251,11 @@ class FasterWhisperRecognizer:
             return 0.0
         return self._total_decode_ms / self._utterances_decoded
 
+    @property
+    def supported_languages(self) -> frozenset[str]:
+        """Language codes this checkpoint handles."""
+        return self._supported
+
     def supports(self, language: LanguageCode) -> bool:
         """Whether this recogniser handles a language.
 
@@ -251,9 +263,12 @@ class FasterWhisperRecognizer:
             language: Language to check.
 
         Returns:
-            ``True`` when Whisper supports it.
+            ``True`` when this checkpoint supports it. A Tamil fine-tune
+            returns ``False`` for English, even though the underlying
+            architecture is multilingual, because the fine-tune has lost that
+            ability and would return confident nonsense.
         """
-        return language.code in _SUPPORTED_LANGUAGES
+        return language.code in self._supported
 
     def warmup(self) -> None:
         """Load the model and run one throwaway decode.
@@ -311,6 +326,15 @@ class FasterWhisperRecognizer:
             raise TranscriptionError(msg)
 
         language = utterance.language or self._language
+        if language is not None and not self.supports(language):
+            supported = ", ".join(sorted(self._supported))
+            msg = (
+                f"Model {self._model_id} does not support {language.english_name} "
+                f"({language.code}). It supports: {supported}. Choose a different "
+                "stt.model, or a language this checkpoint was trained on."
+            )
+            raise TranscriptionError(msg)
+
         started = time.perf_counter()
         segments, detected = self._decode(utterance.pcm, language)
         elapsed_ms = (time.perf_counter() - started) * 1000.0

@@ -322,6 +322,10 @@ class Container:
         if chosen is None:
             chosen = LanguageCode(stt.language) if stt.language else self.source_language()
 
+        # "*" means the full multilingual set; anything else is a fine-tune
+        # restricted to the languages it was trained on.
+        supported = None if "*" in descriptor.languages else frozenset(descriptor.languages)
+
         return FasterWhisperRecognizer(
             model_dir=model_dir,
             model_id=descriptor.id,
@@ -334,6 +338,7 @@ class Container:
                 word_timestamps=stt.word_timestamps,
                 min_confidence=stt.min_confidence,
             ),
+            supported_languages=supported,
         )
 
     def create_segmenter(

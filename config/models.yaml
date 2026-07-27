@@ -63,6 +63,33 @@ models:
     runtime: ctranslate2
     files: [config.json, model.bin, tokenizer.json, vocabulary.txt]
 
+  # Tamil fine-tune, already published in CTranslate2 int8 form.
+  #
+  # Measured on one 6.72-second Tamil utterance against a written reference,
+  # on the target machine:
+  #
+  #   whisper-base         1.6 s   ~80% word error   unusable
+  #   whisper-small        5.2 s   ~50% word error   marginal
+  #   whisper-tamil-small  6.9 s    ~8% word error   accurate
+  #
+  # Generic Whisper is simply weak at Tamil: the fine-tune recovers almost
+  # all of the accuracy, including proper nouns, and the remaining problem is
+  # purely speed. It decodes a little slower than the generic model of the
+  # same size because a correct transcript contains more tokens than a
+  # truncated wrong one.
+  #
+  # Tamil only. `languages` is enforced: the recogniser refuses other
+  # languages rather than producing confident nonsense.
+  whisper-tamil-small:
+    task: stt
+    repo_id: ukta-app/whisper-tamil-ct2
+    revision: fd6de42af4f590e063ec0fc72bc9bfd6c13a4595
+    languages: ["ta"]
+    size_mb: 253
+    runtime: ctranslate2
+    files:
+      [config.json, model.bin, preprocessor_config.json, tokenizer.json, vocabulary.json]
+
   # GPU profile only. The distilled decoder makes it far faster than
   # large-v3 while keeping most of its accuracy.
   whisper-large-v3-turbo:

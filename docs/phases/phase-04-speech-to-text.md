@@ -111,6 +111,41 @@ the language overrides it for the whole chain.
 
 ---
 
+## Tamil accuracy: measured against a written reference
+
+A native speaker recorded a known Tamil sentence, so the output could be
+scored rather than guessed at.
+
+**Reference:** `என் பெயர் சரவணகுமார். இன்று நான் தமிழ் குரல் அடையாளம் சரியாக
+செயல்படுகிறதா என்று சோதித்து வருகிறேன்.`
+
+| Model | Decode | Output | Word error |
+|---|---:|---|---:|
+| `whisper-base` | 1.6 s | `என் பேர்தாராவனக்குமாக இருண்டு நான் தமிழ்க்குரலாடையாக தேல்பெடிரதாயின்று` | ~80 % |
+| `whisper-small` | 5.2 s | `என் பேசராவனக்கு மாறி என்று நான் தமிழ் குரலாடை … சோதித்து வருங்கிறேன்` | ~50 % |
+| **`whisper-tamil-small`** | **6.2–10.5 s** | `என் பேர் சரவணகுமார் இன்று நான் தமிழ் குரல் அடையாளம் சரியாக செயல்படுகிறதா என்று சோதித்து வருகின்றேன்` | **~0–8 %** |
+
+Generic Whisper is simply weak at Tamil, at any size available on this
+hardware. The fine-tune recovers essentially all of it, including the proper
+noun `சரவணகுமார்`, which neither generic model came close to.
+
+**The accuracy problem is solved. The remaining problem is purely speed**, and
+speed has known solutions where accuracy did not.
+
+`whisper-tamil-small` decodes slightly slower than the generic model of the
+same size, for a slightly surprising reason: a *correct* transcript contains
+more tokens than a truncated wrong one, and decoder time scales with tokens.
+
+### Language support is now enforced
+
+The Tamil fine-tune has lost its multilingual ability. Asking it for English
+does not fail inside the model - it returns confident nonsense. The model
+registry therefore declares `languages: ["ta"]`, and the recogniser raises
+`TranscriptionError` rather than decoding a language the checkpoint was not
+trained on.
+
+---
+
 ## What the confidence score is, and is not
 
 Confidence is `exp(avg_logprob)` — the geometric mean of per-token
