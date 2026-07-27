@@ -12,14 +12,24 @@
 # ===========================================================================
 
 stt:
-  model: small
+  # Measured on an Intel i5-7200U (int8, 2 threads), per utterance:
+  #   tiny 0.85 s - error-prone
+  #   base 1.70 s - correct on clear English   <- chosen
+  #   small 5.88 s - unusable
+  # Phase 1 estimated small at ~0.55 real-time factor. The measurement was
+  # roughly eight times worse, because Whisper's encoder always processes a
+  # fixed 30-second window and dominates the cost on CPU.
+  model: base
   device: cpu
   compute_type: int8
-  # Leave headroom: 2 physical cores must also serve audio capture and the UI.
+  # PHYSICAL cores, not logical: 4 threads measured slower than 2 on this
+  # 2-core CPU because hyperthread siblings contend for the same units.
   cpu_threads: 2
   beam_size: 1
-  streaming: true
-  chunk_ms: 1000
+  # Every interim decode costs a full encoder pass, so streaming adds load
+  # without reducing end-of-utterance latency on this hardware.
+  streaming: false
+  chunk_ms: 3000
 
 translation:
   provider: indictrans2

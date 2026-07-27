@@ -86,18 +86,46 @@ vad:
 
 stt:
   provider: faster_whisper
-  model: small
+
+  # tiny | base | small | medium | large-v3-turbo
+  # Measured on an Intel i5-7200U (int8, 2 threads), per utterance:
+  #   tiny 0.85 s (error-prone) | base 1.70 s | small 5.88 s (unusable)
+  # Whisper pads its encoder to a fixed 30-second window, so these times are
+  # per utterance and barely change with utterance length.
+  model: base
+
   device: cpu
   compute_type: int8
+
+  # Should match PHYSICAL cores, not logical. Measured: base took 1.70 s on
+  # 2 threads and 2.16 s on 4, because hyperthread siblings contend for the
+  # same execution units.
   cpu_threads: 2
+
   # Greedy decoding. Beam search costs 2-4x more time for a small accuracy
   # gain that real-time interpretation cannot afford.
   beam_size: 1
-  # Transcribe while the speaker is still talking, so only the final chunk
-  # remains to decode at end-of-utterance.
-  streaming: true
-  chunk_ms: 1000
-  partial_interval_ms: 300
+
+  # Emit interim transcripts during long utterances.
+  # This buys LIVE FEEDBACK, NOT LOWER LATENCY: every interim decode costs a
+  # full Whisper encoder pass, so enabling it adds CPU load without reducing
+  # the delay after you stop speaking. Off by default on CPU.
+  streaming: false
+  chunk_ms: 3000
+  partial_interval_ms: 3000
+
+  # null = decode app.language_pair.source. Auto-detection costs an extra
+  # pass and is unreliable on short utterances.
+  language: null
+
+  # Per-word timings, for caption highlighting. Costs roughly 10% more time.
+  word_timestamps: false
+
+  # Transcripts below this confidence are discarded rather than translated.
+  # Speaking a confident wrong sentence into a meeting is worse than silence.
+  # 0.0 disables the check; raise it once you have measured typical values.
+  min_confidence: 0.0
+
   # null = models/ inside the project directory.
   download_root: null
 

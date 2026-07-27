@@ -30,6 +30,7 @@ import shutil
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Final
 
 import yaml
@@ -37,6 +38,7 @@ import yaml
 from ai_interpreter import __version__
 from ai_interpreter.app.container import Container
 from ai_interpreter.cli_audio import run_list_devices, run_record
+from ai_interpreter.cli_stt import run_benchmark, run_listen, run_transcribe
 from ai_interpreter.domain.errors import InterpreterError
 from ai_interpreter.infrastructure.config.settings import Profile
 from ai_interpreter.infrastructure.system.audio_endpoints import list_windows_audio_endpoints
@@ -64,6 +66,8 @@ _REQUIRED_PACKAGES: Final[tuple[tuple[str, str], ...]] = (
     ("soxr", "Phase 3 - sample rate conversion"),
     ("onnxruntime", "Phase 3 - voice activity detection"),
     ("huggingface_hub", "Phase 3 - model download"),
+    ("faster_whisper", "Phase 4 - speech to text"),
+    ("ctranslate2", "Phase 4 - speech to text runtime"),
 )
 
 # External programs. Missing entries are warnings, not failures: none of them
@@ -171,11 +175,44 @@ def _build_parser() -> argparse.ArgumentParser:
         help="record from the microphone, detect speech, and save test WAV files",
     )
     parser.add_argument(
+        "--transcribe",
+        type=Path,
+        metavar="WAV",
+        default=None,
+        help="transcribe a WAV file, reporting timings and confidence",
+    )
+    parser.add_argument(
+        "--listen",
+        type=float,
+        metavar="SECONDS",
+        default=None,
+        help="capture from the microphone and transcribe each utterance live",
+    )
+    parser.add_argument(
+        "--benchmark",
+        action="store_true",
+        help="measure decode time across thread counts",
+    )
+    parser.add_argument(
         "--device",
         type=str,
         metavar="NAME",
         default=None,
         help="input device name fragment, overriding audio.input.device",
+    )
+    parser.add_argument(
+        "--language",
+        type=str,
+        metavar="CODE",
+        default=None,
+        help="language to decode, e.g. ta or en, overriding stt.language",
+    )
+    parser.add_argument(
+        "--repeats",
+        type=int,
+        metavar="N",
+        default=3,
+        help="timed runs per benchmark configuration (default: 3)",
     )
     parser.add_argument(
         "--profile",
@@ -435,16 +472,28 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print("--record needs a positive number of seconds.", file=sys.stderr)
                 return _EXIT_FAILED_CHECK
             return run_record(container, args.record, args.device)
+        if args.transcribe is not None:
+            return run_transcribe(container, args.transcribe, args.language)
+        if args.listen is not None:
+            if args.listen <= 0:
+                print("--listen needs a positive number of seconds.", file=sys.stderr)
+                return _EXIT_FAILED_CHECK
+            return run_listen(container, args.listen, args.device)
+        if args.benchmark:
+            return run_benchmark(container, args.transcribe, args.repeats, args.language)
 
         print(f"AI Interpreter {__version__}")
         print(f"Profile: {container.selection.profile.value} ({container.selection.reason})")
         print()
         print("The desktop interface is built in Phase 8. Available now:")
-        print("  python -m ai_interpreter --check          verify the environment")
-        print("  python -m ai_interpreter --list-devices   list audio devices")
-        print("  python -m ai_interpreter --record 10      test the microphone")
-        print("  python -m ai_interpreter --print-config   show effective settings")
-        print("  python -m ai_interpreter --help           full option list")
+        print("  python -m ai_interpreter --check           verify the environment")
+        print("  python -m ai_interpreter --list-devices    list audio devices")
+        print("  python -m ai_interpreter --record 10       test the microphone")
+        print("  python -m ai_interpreter --listen 20       live speech to text")
+        print("  python -m ai_interpreter --transcribe f.wav  transcribe a file")
+        print("  python -m ai_interpreter --benchmark       measure decode speed")
+        print("  python -m ai_interpreter --print-config    show effective settings")
+        print("  python -m ai_interpreter --help            full option list")
         return _EXIT_OK
     finally:
         container.shutdown()

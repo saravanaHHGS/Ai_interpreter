@@ -15,8 +15,11 @@ stt:
   compute_type: float16
   cpu_threads: 4
   beam_size: 1
+  # Affordable on a GPU, where an encoder pass is tens of milliseconds rather
+  # than seconds - so live captions cost little.
   streaming: true
-  chunk_ms: 800
+  chunk_ms: 2000
+  word_timestamps: true
 
 translation:
   provider: indictrans2

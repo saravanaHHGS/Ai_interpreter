@@ -1,0 +1,196 @@
+# Phase 4 — Speech to Text
+
+**Status:** complete
+**Version:** 0.4.0
+
+Turns utterances into text, with timestamps, confidence and measured latency.
+This is the phase where estimates were replaced by measurements, and the
+measurements changed the design.
+
+---
+
+## Verification
+
+```powershell
+.\run.ps1 --benchmark                       # measure decode time on this machine
+.\run.ps1 --record 10                       # speak a few sentences
+.\run.ps1 --listen 20                       # live speech to text
+.\run.ps1 --transcribe recordings\<file>.wav --language en
+.\scripts\quality.ps1
+```
+
+First run downloads Whisper `base` (~145 MB). Expected gates: ruff clean,
+mypy clean, **351 tests passing**.
+
+---
+
+## Measured on the target machine
+
+Intel i5-7200U, 2 physical cores, int8, warmed up, decoding **one utterance**:
+
+| Model | 1 thread | 2 threads | 4 threads | Quality |
+|---|---:|---:|---:|---|
+| `tiny` | — | 0.85 s | — | "What's *true, you work, man?*" ❌ |
+| **`base`** | 2.28 s | **1.66 s** | 2.07 s | "What's today your plan?" ✅ |
+| `small` | — | 5.88 s | 7.18 s | ✅ but unusable |
+
+**Speech-to-text delay = 350 ms endpoint + 1.66 s decode ≈ 2.0 s**, before
+translation and speech synthesis are added.
+
+---
+
+## Three findings that changed the design
+
+### 1. Decode cost is constant, not proportional to audio length
+
+Same model, varying input:
+
+| Audio | Decode |
+|---|---|
+| 1.0 s | 0.82 s |
+| 5.0 s | 0.84 s |
+| 9.9 s | 0.96 s |
+
+Whisper pads its mel spectrogram to a fixed **30-second window**, so the
+encoder does identical work regardless of utterance length, and on CPU the
+encoder dominates.
+
+**Consequence: chunked streaming cannot reduce end-of-utterance latency on
+Whisper.** Phase 1 planned to decode in 1-second chunks so that only the final
+chunk remained at end of speech, and estimated this was worth about a second.
+It is worth nothing: each chunk costs a *full* encoder pass, so decoding every
+second would multiply total work rather than spreading it.
+
+Streaming is still implemented, because live captions during a long sentence
+are genuinely useful — but it is documented everywhere as buying **feedback,
+not speed**, and it is off by default on CPU profiles. The
+`StreamingSpeechRecognizer` port is kept because a model whose cost scales
+with input length — Parakeet and other Conformer architectures — would make
+the same interface a latency win with no change to any caller.
+
+### 2. More threads made it slower
+
+`base` took 1.66 s on 2 threads and 2.07 s on 4. The CPU has two physical
+cores; hyperthread siblings share execution units and cache, and CTranslate2's
+matrix kernels lose more to that contention than they gain. `stt.cpu_threads`
+should track **physical** cores, and the benchmark sweeps thread counts so
+this is verifiable rather than assumed.
+
+### 3. Phase 1's estimate was off by roughly eight times
+
+Phase 1 projected Whisper `small` at a 0.55 real-time factor on this class of
+CPU, implying ~1.5 s for a 3-second utterance. Measured: 5.88 s. That is why
+`--benchmark` is a first-class command rather than a one-off script, and why
+`cpu_low` now defaults to `base` rather than `small`.
+
+---
+
+## Two real bugs found by running it
+
+### Warmup took 56 seconds
+
+`warmup()` called the model directly instead of going through this class's
+decode path, so it silently skipped every decode option. faster-whisper's
+default temperature fallback then applied — up to six decoding passes — and on
+silence it took the worst case every time.
+
+Routing warmup through the same `_decode()` as real transcription cut it to
+**4.6 s, then 1.5 s once the model file was in the OS cache**. Pinned by
+`test_warmup_uses_the_configured_decode_options`.
+
+### `--language en` was silently ignored
+
+The segmenter tags each utterance with the configured source language, and
+`transcribe()` treats an utterance's own tag as more specific than the
+recogniser's default. Correct in principle, but it meant the command-line
+override never reached the decoder: English audio was decoded as Tamil,
+producing fluent Tamil gibberish at confidence 0.47.
+
+`create_segmenter()` now accepts a language, and every caller that overrides
+the language overrides it for the whole chain.
+
+---
+
+## What the confidence score is, and is not
+
+Confidence is `exp(avg_logprob)` — the geometric mean of per-token
+probabilities. Measured on the same recording:
+
+| Condition | Confidence |
+|---|---|
+| English audio, decoded as English (correct) | 0.33 – 0.61 |
+| English audio, forced to Tamil (gibberish) | 0.00 – 0.47 |
+
+The ranges **overlap**. Confidence is a useful relative signal — the worst
+transcript scored lowest in both conditions — but it does not cleanly separate
+right from wrong, and it must not be presented as a probability that the
+transcript is correct. `stt.min_confidence` exists to suppress obvious noise
+and defaults to `0.0` (disabled) because a safe threshold has not been
+established.
+
+---
+
+## Files
+
+| File | Purpose |
+|---|---|
+| `infrastructure/stt/faster_whisper.py` | `FasterWhisperRecognizer`, decode options, confidence |
+| `cli_stt.py` | `--transcribe`, `--listen`, `--benchmark` |
+| `config/models.yaml` | Five Whisper models, pinned to full commit hashes |
+| `tests/unit/test_faster_whisper.py` | 46 tests against a fake model, no weights needed |
+
+Tests inject a fake CTranslate2 model. Downloading 145 MB and spending 1.7 s
+per decode would make the suite unusable, and none of the behaviour under test
+belongs to the model: it is the conversion into domain transcripts, the
+confidence calculation, and error handling. Real model behaviour is measured
+by `--benchmark`.
+
+---
+
+## Dependencies added
+
+| Package | Why |
+|---|---|
+| `faster-whisper` | Whisper on CTranslate2: int8 quantisation, low memory, verified to load under Smart App Control in Phase 3 |
+
+`ctranslate2`, `av` and `tokenizers` arrive as its dependencies.
+
+---
+
+## Deviation from the original specification
+
+The specification asked for **NVIDIA Parakeet first, Whisper as fallback**.
+Parakeet is English-only (Phase 1, §1.1) and the required pairs are Tamil and
+Hindi to English, so Whisper is the primary engine.
+
+The measurements have now produced a concrete argument for Parakeet that
+Phase 1 did not have: Parakeet is a Conformer model whose cost **scales with
+input length** rather than padding to 30 seconds. On this CPU a 2-second
+utterance would plausibly decode several times faster than Whisper's fixed
+1.66 s, and streaming would become a real latency win. That makes
+Parakeet-for-English a strong candidate for Phase 10, alongside OpenVINO on
+the Intel integrated GPU — which attacks the same bottleneck, the encoder,
+and would also help Tamil and Hindi.
+
+---
+
+## Latency position after Phase 4
+
+| Stage | Measured | Notes |
+|---|---:|---|
+| End-of-speech detection | 350 ms | `vad.min_silence_ms` |
+| Speech to text | 1660 ms | `base`, 2 threads |
+| **Subtotal** | **~2.0 s** | Translation and synthesis still to come |
+
+The 2-second target will not be met on this CPU with `base`. The honest
+options are Parakeet or OpenVINO for English, `tiny` at a real accuracy cost,
+or a GPU. Phase 5 measures translation next, so the full picture is known
+before any of them is chosen.
+
+---
+
+## What Phase 5 adds
+
+Translation: IndicTrans2-200M for Tamil and Hindi to English, behind a
+`Translator` port with pluggable providers, plus a translation cache and the
+same style of measured benchmark.

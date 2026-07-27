@@ -83,7 +83,9 @@ class TestConfigLoader:
         settings, report = ConfigLoader(paths, environ={}).load(Profile.CPU_LOW)
 
         assert settings.app.profile is Profile.CPU_LOW
-        assert settings.stt.model == "small"
+        # `base`, not `small`: measured at 1.70 s versus 5.88 s per utterance
+        # on the 2-core target CPU. See docs/phases/phase-04-speech-to-text.md.
+        assert settings.stt.model == "base"
         assert settings.stt.cpu_threads == 2
         assert settings.pipeline.inference_lane.value == "serial"
         assert len(report.sources) == 2

@@ -12,6 +12,70 @@
 # ===========================================================================
 
 models:
+  # -- Speech to text ------------------------------------------------------
+  #
+  # CTranslate2 conversions of OpenAI Whisper, run by faster-whisper.
+  #
+  # Measured on the target machine (Intel i5-7200U, int8, 2 threads, warmed
+  # up). Note that the times are per *utterance*, not per second of audio:
+  # Whisper pads its encoder to a fixed 30-second window, so a 2-second
+  # utterance costs the same as a 10-second one.
+  #
+  #   tiny    0.85 s   noticeably error-prone
+  #   base    1.70 s   correct on clear English - the cpu_low default
+  #   small   5.88 s   unusable on this CPU
+  #
+  # File lists are exact: `model.bin` plus its tokeniser, and nothing else.
+  # The README is not downloaded.
+  whisper-tiny:
+    task: stt
+    repo_id: Systran/faster-whisper-tiny
+    revision: d90ca5fe260221311c53c58e660288d3deb8d356
+    languages: ["*"]
+    size_mb: 75
+    runtime: ctranslate2
+    files: [config.json, model.bin, tokenizer.json, vocabulary.txt]
+
+  whisper-base:
+    task: stt
+    repo_id: Systran/faster-whisper-base
+    revision: ebe41f70d5b6dfa9166e2c581c45c9c0cfc57b66
+    languages: ["*"]
+    size_mb: 145
+    runtime: ctranslate2
+    files: [config.json, model.bin, tokenizer.json, vocabulary.txt]
+
+  whisper-small:
+    task: stt
+    repo_id: Systran/faster-whisper-small
+    revision: 536b0662742c02347bc0e980a01041f333bce120
+    languages: ["*"]
+    size_mb: 484
+    runtime: ctranslate2
+    files: [config.json, model.bin, tokenizer.json, vocabulary.txt]
+
+  whisper-medium:
+    task: stt
+    repo_id: Systran/faster-whisper-medium
+    revision: 08e178d48790749d25932bbc082711ddcfdfbc4f
+    languages: ["*"]
+    size_mb: 1530
+    runtime: ctranslate2
+    files: [config.json, model.bin, tokenizer.json, vocabulary.txt]
+
+  # GPU profile only. The distilled decoder makes it far faster than
+  # large-v3 while keeping most of its accuracy.
+  whisper-large-v3-turbo:
+    task: stt
+    repo_id: deepdml/faster-whisper-large-v3-turbo-ct2
+    revision: 4df90f75321148c3a29a9e2351b7ddf8f5b115a8
+    languages: ["*"]
+    size_mb: 1620
+    runtime: ctranslate2
+    files:
+      [config.json, model.bin, preprocessor_config.json, tokenizer.json, vocabulary.json]
+
+  # -- Voice activity detection -------------------------------------------
   silero-vad:
     task: vad
     repo_id: onnx-community/silero-vad

@@ -163,8 +163,12 @@ kept as strings otherwise (`small`, `CABLE Input`).
 | Profile | Selected when | STT | MT | TTS | Lane |
 |---|---|---|---|---|---|
 | `cuda` | NVIDIA GPU, >= 6 GB VRAM | large-v3-turbo fp16 | IndicTrans2 fp16 | Kokoro | parallel |
-| `cpu_high` | >= 6 physical cores | medium int8 | IndicTrans2 int8 | Piper | parallel |
-| `cpu_low` | fewer cores | small int8 | IndicTrans2 int8 | Piper | serial |
+| `cpu_high` | >= 6 physical cores | small int8 | IndicTrans2 int8 | Piper | parallel |
+| `cpu_low` | fewer cores | **base** int8 | IndicTrans2 int8 | Piper | serial |
+
+`cpu_low` used `small` until Phase 4 measured it at 5.88 s per utterance
+against 1.66 s for `base`. The CPU tiers were each demoted one size on
+evidence.
 
 **`inference_lane` is the interesting one.** On a two-core CPU, running three
 models concurrently is *slower* than running them one after another, because
@@ -205,28 +209,43 @@ The meaningful metric is **EOU→FTS**: End Of Utterance to First Translated
 Sample. Measuring from the *start* of speech would include however long you
 talked, which the application cannot control.
 
-| Stage | `cuda` | `cpu_low` (streaming) |
+| Stage | `cuda` (estimate) | `cpu_low` (**measured**) |
 |---|---:|---:|
-| VAD endpoint (silence hangover) | 300 ms | 350 ms |
-| Frame handoff and jitter | 15 ms | 15 ms |
-| STT final decode | 120-220 ms | 600-900 ms |
-| Translation | 60-110 ms | 150-300 ms |
-| TTS first chunk | 80-140 ms | 200-350 ms |
+| VAD endpoint (silence hangover) | 300 ms | **350 ms** |
+| Frame handoff and jitter | 15 ms | **15 ms** |
+| STT decode | 120-220 ms | **1660 ms** (Whisper `base`, 2 threads) |
+| Translation | 60-110 ms | not yet measured (Phase 5) |
+| TTS first chunk | 80-140 ms | not yet measured (Phase 6) |
 | Output buffer to the virtual cable | 40-60 ms | 60 ms |
-| **Total** | **≈ 0.65-0.9 s** | **≈ 1.4-2.0 s** |
+| **Total** | **≈ 0.65-0.9 s** | **≥ 2.0 s already** |
 
-These are **design targets**. Phases 4, 6 and 10 replace them with measured
-numbers from a benchmark harness.
+The `cpu_low` figures are measured on an Intel i5-7200U with `--benchmark`.
+The `cuda` column remains an estimate until it runs on such a machine.
 
-Three optimisations do the heavy lifting on weak hardware:
+### What Phase 4 measurement overturned
 
-1. **Streaming transcription.** Decode in ~1 s chunks while the speaker is
-   still talking, so only the final chunk remains at end of utterance. This
-   alone is worth roughly 1 second on `cpu_low`.
-2. **Speculative translation.** Once the transcript prefix stops changing,
-   translate it before the sentence ends.
-3. **Translation cache.** Conversational speech repeats heavily; repeated
-   phrases cost nothing.
+Phase 1 listed three optimisations. Measurement killed the first one.
+
+1. ~~**Streaming transcription.**~~ **Does not work on Whisper.** Whisper pads
+   its encoder to a fixed 30-second window, so a 1-second chunk costs a *full*
+   encoder pass — decoding every second multiplies the work instead of
+   spreading it. Measured: the same model took 0.82 s on 1 second of audio and
+   0.96 s on 9.9 seconds. Streaming is implemented for live captions, and is
+   documented as buying feedback rather than speed.
+2. **Speculative translation.** Still viable, and now more valuable: with STT
+   costing 1.66 s, overlapping translation with it is worth proportionally
+   more. Phase 10.
+3. **Translation cache.** Still viable. Phase 10.
+
+Two replacements for the lost optimisation, both attacking the encoder, which
+is the actual bottleneck:
+
+4. **A model whose cost scales with input length.** NVIDIA Parakeet and other
+   Conformer architectures do not pad to 30 seconds. English-only, so it would
+   serve one direction. This is what the original specification asked for, and
+   the measurements now supply the reason.
+5. **OpenVINO on the Intel integrated GPU.** Accelerates the Whisper encoder
+   directly, and unlike Parakeet it helps Tamil and Hindi too.
 
 ---
 

@@ -17,8 +17,8 @@ machine.
 |-------|-------|-------|
 | 1 | Architecture design | Complete |
 | 2 | Project foundation: config, logging, DI, tests | Complete |
-| 3 | Audio capture, VAD, device selection | **Complete** |
-| 4 | Speech to text | Not started |
+| 3 | Audio capture, VAD, device selection | Complete |
+| 4 | Speech to text | **Complete** |
 | 5 | Translation engine | Not started |
 | 6 | Text to speech | Not started |
 | 7 | Virtual microphone routing | Not started |
@@ -69,7 +69,10 @@ Full instructions, including what to install and why: [docs/setup.md](docs/setup
   32 ms frame) with an adaptive energy detector as a model-free fallback.
 - **Utterance segmentation** with pre-roll, so the first syllable is never
   clipped, plus test recordings you can listen to.
-- **289 tests**, plus lint and strict type checking, all passing.
+- **Speech to text** with Whisper on CTranslate2 (int8), producing timestamps
+  and confidence, plus a `--benchmark` command that measures decode time on
+  your own machine instead of trusting an estimate.
+- **351 tests**, plus lint and strict type checking, all passing.
 
 ---
 
@@ -112,6 +115,10 @@ results.
 .\run.ps1 --list-devices             # every audio input and output device
 .\run.ps1 --record 10                # capture 10 s, detect speech, save WAV files
 .\run.ps1 --record 10 --device "CABLE Output"   # capture from a named device
+.\run.ps1 --listen 20                # live speech to text from the microphone
+.\run.ps1 --transcribe file.wav      # transcribe a file with timings
+.\run.ps1 --transcribe file.wav --language en   # force the decode language
+.\run.ps1 --benchmark                # measure decode time across thread counts
 .\run.ps1 --print-config             # effective configuration as YAML
 .\run.ps1 --print-config --profile cuda   # preview another hardware profile
 .\run.ps1 --version

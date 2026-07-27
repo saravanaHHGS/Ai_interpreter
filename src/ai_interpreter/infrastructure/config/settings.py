@@ -259,6 +259,11 @@ class SttSection(BaseModel):
     chunk_ms: Milliseconds
     partial_interval_ms: Milliseconds
     download_root: str | None
+    # null = use app.language_pair.source. Passing the known language is both
+    # faster and more reliable than Whisper's auto-detection.
+    language: str | None
+    word_timestamps: bool
+    min_confidence: Probability
 
 
 class TranslationCacheSection(BaseModel):

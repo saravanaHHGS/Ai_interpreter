@@ -344,6 +344,78 @@ recognition accuracy. Use a wired or USB headset.
 
 ---
 
+## Speech to text (Phase 4)
+
+### The transcript is fluent nonsense in the wrong language
+
+Whisper was forced to decode audio in a language it is not in, and it will
+happily invent plausible text rather than fail. The decode language comes from
+`app.language_pair.source` unless `stt.language` overrides it.
+
+```powershell
+.\run.ps1 --transcribe file.wav --language en
+```
+
+Note that `--language` also re-tags the utterances, because an utterance's own
+language tag takes precedence over the recogniser's default.
+
+### Transcription is slow
+
+```powershell
+.\run.ps1 --benchmark
+```
+
+Measured on an Intel i5-7200U (2 physical cores, int8, per utterance):
+
+| Model | 2 threads |
+|---|---|
+| `tiny` | 0.85 s, noticeably error-prone |
+| `base` | 1.66 s, the `cpu_low` default |
+| `small` | 5.88 s, unusable |
+
+Decode time is roughly **constant per utterance**, not proportional to its
+length, because Whisper pads its encoder to a fixed 30-second window. A
+one-word utterance costs about the same as a ten-second one.
+
+To go faster: `stt.model: tiny` (measurable accuracy loss), or a GPU.
+Enabling `stt.streaming` does **not** help — see below.
+
+### Setting `stt.streaming: true` made things worse
+
+Expected. Every interim decode costs a full Whisper encoder pass, so streaming
+adds CPU load without reducing the delay after you stop speaking. It exists to
+show live captions during long sentences. On CPU profiles, leave it off.
+
+### More threads made it slower
+
+Also expected on a 2-core machine. `stt.cpu_threads` should match **physical**
+cores, not logical: hyperthread siblings contend for the same execution units,
+and CTranslate2's matrix kernels lose more to that than they gain. Measured:
+`base` took 1.66 s on 2 threads and 2.07 s on 4.
+
+### Confidence looks low even when the transcript is right
+
+Confidence is `exp(avg_logprob)`, the geometric mean of per-token
+probabilities. Correct English decoded as English measured 0.33–0.61 on the
+development machine. It is a *relative* signal, not a probability that the
+transcript is correct, and its range overlaps with wrong-language output.
+Do not set `stt.min_confidence` above about 0.2 without measuring your own
+values first, or correct transcripts will be discarded.
+
+### Nothing is transcribed but speech was detected
+
+Whisper returned no segments. Usually the audio is too quiet or too noisy.
+Check the level with `--record 10`, then try `--language` explicitly — forcing
+the wrong language can also produce an empty result.
+
+### The first transcription is much slower than the rest
+
+The first decode loads the model and initialises kernels. `warmup()` pays this
+during startup; commands that report a "Warmup" time have already done so.
+1–5 seconds is normal, depending on whether the model file is in the OS cache.
+
+---
+
 ## Performance
 
 ### Latency is higher than expected

@@ -57,6 +57,10 @@ from ai_interpreter.infrastructure.logging.setup import LoggingService
 from ai_interpreter.infrastructure.models.hf_repository import HuggingFaceModelRepository
 from ai_interpreter.infrastructure.models.registry import ModelRegistry
 from ai_interpreter.infrastructure.paths import ApplicationPaths
+from ai_interpreter.infrastructure.stt.faster_whisper import (
+    FasterWhisperRecognizer,
+    WhisperDecodeOptions,
+)
 from ai_interpreter.infrastructure.system.hardware import HardwareProbe
 
 __all__ = ["Container"]
@@ -279,12 +283,74 @@ class Container:
             warmup()
         return detector
 
-    def create_segmenter(self, sample_rate: SampleRate | None = None) -> UtteranceSegmenter:
+    def source_language(self) -> LanguageCode:
+        """Language the user speaks, from ``app.language_pair.source``.
+
+        Returns:
+            The configured source language.
+        """
+        return LanguageCode(self.settings.app.language_pair.source)
+
+    def create_recognizer(self, language: LanguageCode | None = None) -> FasterWhisperRecognizer:
+        """Build the speech recogniser named in configuration.
+
+        Downloads the model on first use.
+
+        Args:
+            language: Language to decode, overriding configuration. ``None``
+                resolves ``stt.language``, then the configured source
+                language.
+
+        Returns:
+            The recogniser, not yet warmed up - call ``warmup()`` before
+            timing anything, or the first decode pays the initialisation cost.
+
+        Raises:
+            ConfigurationError: If the provider or model name is unknown.
+            ModelDownloadError: If the weights cannot be obtained.
+        """
+        stt = self.settings.stt
+        provider = stt.provider.strip().lower()
+        if provider != "faster_whisper":
+            msg = f"Unknown stt.provider {stt.provider!r}. Valid: faster_whisper"
+            raise ConfigurationError(msg)
+
+        descriptor = self.models.get(f"whisper-{stt.model}")
+        model_dir = self.model_repository.ensure(descriptor)
+
+        chosen = language
+        if chosen is None:
+            chosen = LanguageCode(stt.language) if stt.language else self.source_language()
+
+        return FasterWhisperRecognizer(
+            model_dir=model_dir,
+            model_id=descriptor.id,
+            device=stt.device,
+            compute_type=stt.compute_type,
+            cpu_threads=stt.cpu_threads,
+            language=chosen,
+            options=WhisperDecodeOptions(
+                beam_size=stt.beam_size,
+                word_timestamps=stt.word_timestamps,
+                min_confidence=stt.min_confidence,
+            ),
+        )
+
+    def create_segmenter(
+        self,
+        sample_rate: SampleRate | None = None,
+        language: LanguageCode | None = None,
+    ) -> UtteranceSegmenter:
         """Build the utterance state machine from configuration.
 
         Args:
             sample_rate: Rate of the frames it will receive, or ``None`` to
                 use the configured model rate.
+            language: Language to tag utterances with, or ``None`` for the
+                configured source language. An utterance's own tag takes
+                precedence over the recogniser's default, so a caller
+                overriding the language must override it here too - otherwise
+                the tag silently wins and the override appears to do nothing.
 
         Returns:
             The configured segmenter.
@@ -298,7 +364,7 @@ class Container:
             min_silence_ms=vad.min_silence_ms,
             pre_roll_ms=vad.pre_roll_ms,
             max_utterance_ms=vad.max_utterance_ms,
-            language=LanguageCode(self.settings.app.language_pair.source),
+            language=language or self.source_language(),
         )
 
     def shutdown(self) -> None:
