@@ -25,7 +25,7 @@ import sys
 from dataclasses import dataclass
 from typing import Final
 
-__all__ = ["AudioEndpoint", "list_windows_audio_endpoints"]
+__all__ = ["AudioEndpoint", "compose_endpoint_name", "list_windows_audio_endpoints"]
 
 logger = logging.getLogger(__name__)
 
@@ -37,15 +37,25 @@ if sys.platform == "win32":
 
 _MMDEVICES_ROOT: Final[str] = r"SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio"
 
-# PROPERTYKEY value names, tried in order of usefulness:
-#   PKEY_Device_FriendlyName          -> "Speakers (Conexant ISST Audio)"
-#   PKEY_DeviceInterface_FriendlyName -> "Conexant ISST Audio"
-#   PKEY_Device_DeviceDesc            -> "Speakers"
-_NAME_PROPERTY_KEYS: Final[tuple[str, ...]] = (
-    "{a45c254e-df1c-4efd-8020-67d146a850e0},14",
-    "{b3f8fa53-0004-438e-9003-51a46e139bfc},6",
-    "{a45c254e-df1c-4efd-8020-67d146a850e0},2",
-)
+# PROPERTYKEY value names.
+#
+#   PKEY_Device_FriendlyName          "CABLE Input (VB-Audio Virtual Cable)"
+#   PKEY_Device_DeviceDesc            "CABLE Input"
+#   PKEY_DeviceInterface_FriendlyName "VB-Audio Virtual Cable"
+#
+# PKEY_Device_FriendlyName is the ideal single source, but it is frequently
+# absent - it is missing for every endpoint on the development machine. When
+# it is, the two remaining parts are combined in the same "desc (interface)"
+# form Windows itself displays.
+#
+# Getting this right matters beyond cosmetics: the composed string is exactly
+# what PortAudio reports as a device name on WASAPI, so a device configured
+# as "CABLE Input (VB-Audio Virtual Cable)" matches in Phase 3 without any
+# translation layer. Using the interface name alone would make every VB-CABLE
+# endpoint indistinguishable, since they all share it.
+_PKEY_DEVICE_FRIENDLY_NAME: Final[str] = "{a45c254e-df1c-4efd-8020-67d146a850e0},14"
+_PKEY_DEVICE_DESC: Final[str] = "{a45c254e-df1c-4efd-8020-67d146a850e0},2"
+_PKEY_INTERFACE_FRIENDLY_NAME: Final[str] = "{b3f8fa53-0004-438e-9003-51a46e139bfc},6"
 
 # DEVICE_STATE_ACTIVE from mmdeviceapi.h
 _DEVICE_STATE_ACTIVE: Final[int] = 1
@@ -173,15 +183,47 @@ def _read_device_state(root: winreg.HKEYType, guid: str) -> bool:
         return True
 
 
+def compose_endpoint_name(
+    friendly_name: str | None,
+    device_desc: str | None,
+    interface_name: str | None,
+) -> str | None:
+    """Build the display name Windows would show for an endpoint.
+
+    Kept separate from registry access so the naming rules - the part with
+    actual logic in them - are testable without a registry.
+
+    Args:
+        friendly_name: ``PKEY_Device_FriendlyName``, often absent.
+        device_desc: ``PKEY_Device_DeviceDesc``, e.g. ``"CABLE Input"``.
+        interface_name: ``PKEY_DeviceInterface_FriendlyName``, e.g.
+            ``"VB-Audio Virtual Cable"``. Shared by every endpoint of one
+            device, so it can never identify an endpoint on its own.
+
+    Returns:
+        The best available name, or ``None`` when nothing usable was found.
+    """
+    friendly = (friendly_name or "").strip()
+    if friendly:
+        return friendly
+
+    desc = (device_desc or "").strip()
+    interface = (interface_name or "").strip()
+
+    if desc and interface:
+        return f"{desc} ({interface})"
+    return desc or interface or None
+
+
 def _read_endpoint_name(root: winreg.HKEYType, guid: str) -> str | None:
-    """Read the friendliest available name for an endpoint.
+    """Read and compose the display name for an endpoint.
 
     Args:
         root: Open registry key for the direction.
         guid: GUID subkey identifying the endpoint.
 
     Returns:
-        The best available name, or ``None`` when none could be read.
+        The endpoint name, or ``None`` when none could be read.
     """
     try:
         properties = winreg.OpenKey(root, f"{guid}\\Properties")
@@ -189,12 +231,25 @@ def _read_endpoint_name(root: winreg.HKEYType, guid: str) -> str | None:
         return None
 
     with properties:
-        for property_key in _NAME_PROPERTY_KEYS:
-            try:
-                value, _ = winreg.QueryValueEx(properties, property_key)
-            except OSError:
-                continue
-            if isinstance(value, str) and value.strip():
-                return value.strip()
+        return compose_endpoint_name(
+            _read_string_property(properties, _PKEY_DEVICE_FRIENDLY_NAME),
+            _read_string_property(properties, _PKEY_DEVICE_DESC),
+            _read_string_property(properties, _PKEY_INTERFACE_FRIENDLY_NAME),
+        )
 
-    return None
+
+def _read_string_property(key: winreg.HKEYType, property_key: str) -> str | None:
+    """Read one string-valued registry property.
+
+    Args:
+        key: Open ``Properties`` registry key.
+        property_key: PROPERTYKEY-formatted value name.
+
+    Returns:
+        The string value, or ``None`` when absent or not a string.
+    """
+    try:
+        value, _ = winreg.QueryValueEx(key, property_key)
+    except OSError:
+        return None
+    return value if isinstance(value, str) else None

@@ -212,13 +212,31 @@ def _check_audio_endpoints(result: _CheckResult) -> None:
         return
 
     for endpoint in endpoints:
-        marker = "CABLE" if endpoint.is_virtual_cable else endpoint.direction
-        _row(f"[{marker:<7}]", endpoint.name)
+        # Direction is always shown. Replacing it with a "CABLE" tag would hide
+        # exactly the information needed to route audio: the playback endpoint
+        # (CABLE Input) and the capture endpoint (CABLE Output) are different
+        # halves of one cable and are not interchangeable.
+        suffix = "   <- virtual cable" if endpoint.is_virtual_cable else ""
+        _row(f"[{endpoint.direction:<7}]", f"{endpoint.name}{suffix}")
 
-    if not any(endpoint.is_virtual_cable for endpoint in endpoints):
+    cables = [endpoint for endpoint in endpoints if endpoint.is_virtual_cable]
+    if not cables:
         result.warnings.append(
             "No virtual audio cable detected. Install VB-CABLE and reboot before Phase 7 "
             "(see docs/setup.md). It is not needed until then."
+        )
+        return
+
+    has_render = any(cable.direction == "render" for cable in cables)
+    has_capture = any(cable.direction == "capture" for cable in cables)
+    if has_render and has_capture:
+        print()
+        _row("Virtual cable ready", "playback -> CABLE Input, meeting app mic -> CABLE Output")
+    else:
+        missing = "capture (CABLE Output)" if has_render else "playback (CABLE Input)"
+        result.warnings.append(
+            f"A virtual cable was found but its {missing} half is missing or disabled. "
+            "Check Windows Sound settings, or reinstall VB-CABLE and reboot."
         )
 
 
