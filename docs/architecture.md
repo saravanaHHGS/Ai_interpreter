@@ -17,6 +17,7 @@ subordinate to them.
 | C3 | **Tamil ↔ English only.** Other languages may remain in the schema but are not tested or optimised for. |
 | C4 | **True streaming.** Translated speech must begin before the speaker finishes, driven by partial recognition and incremental translation. |
 | C5 | **Under 2 seconds end to end**, on CPU. |
+| C6 | **PyTorch cannot run on the target machine.** Windows Smart App Control blocks `torch_python.dll` outright (WinError 4551), and disabling it is a one-way door. Every model must ship as pre-exported ONNX or CTranslate2 weights; local export is impossible. |
 
 GPU adapters stay in the codebase behind their ports, so the option is never
 closed off - but the CPU path is the product, not a fallback.
@@ -384,11 +385,42 @@ opt-in adapters with a licence warning.
 | 4 | What is the real measured latency on `cpu_low`? | **Answered, Phase 4.** 350 ms endpoint + 1.66 s (English) or 6-10 s (Tamil) |
 | 5 | **Is there a streaming Tamil ASR model that is both accurate and fast enough on 2 cores?** | **Open, and the single blocker for constraints C4 and C5.** Candidates: `vakyansh-wav2vec2-tamil` (621k downloads) and `ai4bharat/indic-conformer-600m-multilingual` (67k). Both are CTC, so cost scales with input length; both need ONNX export and validation |
 
-Question 5 is now the most important open item in the project. Everything else
-in the streaming design - partial recognition, incremental translation,
-sentence-chunked synthesis - is buildable on measured foundations. Tamil input
-is the one stage with no known model that is simultaneously accurate enough and
-fast enough.
+**Question 5 was answered the next day, and the answer is yes.**
 
-Question 1 has a designed fallback (on-screen captions), so a negative answer
-delays a feature rather than blocking the project. Question 5 does not have one.
+`ai4bharat` IndicConformer Tamil (CTC, 600M-family, int8 ONNX export published
+by OpenVoiceOS) was measured on the same Tamil reference recording used to
+score the Whisper models:
+
+| | `whisper-tamil-small` | **IndicConformer-ta int8** |
+|---|---|---|
+| Accuracy vs written reference | ~0-8 % word error | **~0-3 %** — also fixed இன்று, which the Whisper fine-tune got wrong |
+| 6.72 s utterance decode | 6.2-10.5 s | **3.7 s** |
+| Real-time factor (2 threads) | n/a (fixed window) | **0.55, linear in audio length** |
+| Cost of 1 s of audio | same as 30 s | **533 ms** |
+
+The linear scaling is the decisive property. With chunked incremental decoding,
+audio is transcribed *while the speaker talks*, and after end of utterance only
+the final chunk remains to decode - a tail of roughly 0.5-1.5 s instead of
+6-10 s. **Constraint C5 (<2 s) is therefore reachable for Tamil input.**
+
+For English, NVIDIA NeMo *streaming* fast-conformer CTC (480 ms chunks, int8,
+132 MB) was measured at **RTF 0.110** with genuinely incremental output -
+`hi` → `hi hello` → `hi hello how are you` appearing while the audio was still
+playing, first sentence perfect. Later sentences degraded on accented
+conversational speech, so English finals may need the larger NeMo variant, the
+110M Parakeet-TDT export, or a hybrid that pairs streaming partials with a
+Whisper `base` final pass. That choice is an accuracy tuning question, not an
+architecture question.
+
+Two environment facts discovered en route, both permanent:
+
+* **PyTorch is blocked outright** by Smart App Control (`torch_python.dll`,
+  WinError 4551). Any model that requires torch at runtime - and any local
+  ONNX export - is impossible on this machine. Only pre-exported ONNX or
+  CTranslate2 weights are usable. This is recorded as constraint C6.
+* The OpenVoiceOS Tamil export ships without the metadata sherpa-onnx
+  requires; the model file must have `vocab_size` etc. stamped into its ONNX
+  metadata after download. A ~20-line post-download patch, applied once.
+
+Question 1 (Tamil TTS) still has a designed fallback (on-screen captions), so
+a negative answer there delays a feature rather than blocking the project.
