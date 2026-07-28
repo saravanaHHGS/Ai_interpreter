@@ -20,7 +20,7 @@ translation:
   provider: indictrans2
   device: cpu
   compute_type: int8
-  beam_size: 2
+  beam_size: 4
 
 tts:
   provider: piper

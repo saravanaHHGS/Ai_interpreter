@@ -18,8 +18,8 @@ machine.
 | 1 | Architecture design | Complete |
 | 2 | Project foundation: config, logging, DI, tests | Complete |
 | 3 | Audio capture, VAD, device selection | Complete |
-| 4 | Speech to text | **Complete** |
-| 5 | Translation engine | Not started |
+| 4 | Speech to text (incl. streaming-capable engines) | Complete |
+| 5 | Translation engine | **Complete** |
 | 6 | Text to speech | Not started |
 | 7 | Virtual microphone routing | Not started |
 | 8 | PySide6 desktop interface | Not started |
@@ -69,10 +69,14 @@ Full instructions, including what to install and why: [docs/setup.md](docs/setup
   32 ms frame) with an adaptive energy detector as a model-free fallback.
 - **Utterance segmentation** with pre-roll, so the first syllable is never
   clipped, plus test recordings you can listen to.
-- **Speech to text** with Whisper on CTranslate2 (int8), producing timestamps
-  and confidence, plus a `--benchmark` command that measures decode time on
-  your own machine instead of trusting an estimate.
-- **351 tests**, plus lint and strict type checking, all passing.
+- **Speech to text** routed per language: IndicConformer for Tamil (linear
+  decode cost — the property that makes CPU streaming possible) and Whisper
+  on CTranslate2 for English, plus a `--benchmark` command that measures
+  decode time on your own machine instead of trusting an estimate.
+- **Tamil ↔ English translation** with IndicTrans2-200M on CTranslate2:
+  0.19–1.3 s per sentence on two cores, with an LRU cache that answers
+  repeated phrases in ~0.03 ms.
+- **459 tests**, plus lint and strict type checking, all passing.
 
 ---
 
@@ -119,6 +123,8 @@ results.
 .\run.ps1 --transcribe file.wav      # transcribe a file with timings
 .\run.ps1 --transcribe file.wav --language en   # force the decode language
 .\run.ps1 --benchmark                # measure decode time across thread counts
+.\run.ps1 --translate "நாளைக்கு என்ன திட்டம்?"          # Tamil -> English
+.\run.ps1 --translate "Hello" --source en --target ta   # English -> Tamil
 .\run.ps1 --print-config             # effective configuration as YAML
 .\run.ps1 --print-config --profile cuda   # preview another hardware profile
 .\run.ps1 --version

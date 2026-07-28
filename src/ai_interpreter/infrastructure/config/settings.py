@@ -284,7 +284,10 @@ class TranslationSection(BaseModel):
     model_config = _STRICT
 
     provider: str = Field(min_length=1)
-    model: str = Field(min_length=1)
+    # Direction key ("indic-en" / "en-indic") -> model registry identifier.
+    # IndicTrans2 ships one checkpoint per direction, so this cannot be a
+    # single model name.
+    models: dict[str, str]
     device: str = Field(min_length=1)
     compute_type: str = Field(min_length=1)
     beam_size: int = Field(ge=1, le=10)

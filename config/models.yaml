@@ -152,6 +152,46 @@ models:
     runtime: sherpa-nemo-ctc-streaming
     files: [model.int8.onnx, tokens.txt]
 
+  # -- Translation ---------------------------------------------------------
+  #
+  # IndicTrans2 distilled 200M, CTranslate2 exports (constraint C6: the
+  # PyTorch reference implementation cannot run on the target machine).
+  # One checkpoint per direction. Loaded with compute_type=int8, so the
+  # 847 MB fp32 download quantises to roughly 220 MB of RAM at load.
+  #
+  # Measured on the target machine (2 threads, beam 4): 0.19-1.3 s per
+  # sentence, both directions, with the quality shown in
+  # docs/phases/phase-05-translation.md.
+  indictrans2-indic-en:
+    task: mt
+    repo_id: adalat-ai/ct2-rotary-indictrans2-indic-en-dist-200M
+    revision: 524aade4f724dccbc6cd5ffb5e3c5c832a2baee4
+    languages: ["ta", "hi", "te", "ml", "kn", "bn", "mr", "gu", "pa", "en"]
+    size_mb: 856
+    runtime: ctranslate2-seq2seq
+    files:
+      - indic-en-200m-ct2/ctranslate2_model/config.json
+      - indic-en-200m-ct2/ctranslate2_model/model.bin
+      - indic-en-200m-ct2/ctranslate2_model/source_vocabulary.json
+      - indic-en-200m-ct2/ctranslate2_model/target_vocabulary.json
+      - indic-en-200m-ct2/ctranslate2_model/vocab/model.SRC
+      - indic-en-200m-ct2/ctranslate2_model/vocab/model.TGT
+
+  indictrans2-en-indic:
+    task: mt
+    repo_id: adalat-ai/ct2-rotary-indictrans2-en-indic-dist-200M
+    revision: ee04de9a86e42920ac310a0fe5a1505c85671b68
+    languages: ["en", "ta", "hi", "te", "ml", "kn", "bn", "mr", "gu", "pa"]
+    size_mb: 856
+    runtime: ctranslate2-seq2seq
+    files:
+      - en-indic-200m-ct2/ctranslate2_model/config.json
+      - en-indic-200m-ct2/ctranslate2_model/model.bin
+      - en-indic-200m-ct2/ctranslate2_model/source_vocabulary.json
+      - en-indic-200m-ct2/ctranslate2_model/target_vocabulary.json
+      - en-indic-200m-ct2/ctranslate2_model/vocab/model.SRC
+      - en-indic-200m-ct2/ctranslate2_model/vocab/model.TGT
+
   # -- Voice activity detection -------------------------------------------
   silero-vad:
     task: vad

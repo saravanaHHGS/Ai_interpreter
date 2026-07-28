@@ -46,6 +46,8 @@ dependencies = [
     "faster-whisper>=1.1,<2",  # Whisper on CTranslate2: int8, low memory
     "sherpa-onnx>=1.12,<2",    # NeMo conformer CTC: linear-cost, streaming-capable
     "onnx>=1.17,<2",           # metadata patching for exports missing sherpa keys
+    # Phase 5 - translation
+    "sentencepiece>=0.2,<1",   # IndicTrans2 tokenisation (CT2 needs token strings)
 ]
 
 [project.optional-dependencies]
@@ -149,6 +151,7 @@ module = [
     "ctranslate2.*",
     "sherpa_onnx.*",
     "onnx.*",
+    "sentencepiece.*",
 ]
 ignore_missing_imports = true
 

@@ -39,6 +39,7 @@ from ai_interpreter import __version__
 from ai_interpreter.app.container import Container
 from ai_interpreter.cli_audio import run_list_devices, run_record
 from ai_interpreter.cli_stt import run_benchmark, run_listen, run_transcribe
+from ai_interpreter.cli_translate import run_translate
 from ai_interpreter.domain.errors import InterpreterError
 from ai_interpreter.infrastructure.config.settings import Profile
 from ai_interpreter.infrastructure.system.audio_endpoints import list_windows_audio_endpoints
@@ -70,6 +71,7 @@ _REQUIRED_PACKAGES: Final[tuple[tuple[str, str], ...]] = (
     ("ctranslate2", "Phase 4 - speech to text runtime"),
     ("sherpa_onnx", "Phase 4b - streaming speech to text"),
     ("onnx", "Phase 4b - model metadata patching"),
+    ("sentencepiece", "Phase 5 - translation tokenisation"),
 )
 
 # External programs. Missing entries are warnings, not failures: none of them
@@ -194,6 +196,27 @@ def _build_parser() -> argparse.ArgumentParser:
         "--benchmark",
         action="store_true",
         help="measure decode time across thread counts",
+    )
+    parser.add_argument(
+        "--translate",
+        type=str,
+        metavar="TEXT",
+        default=None,
+        help="translate text with the configured engine and report timings",
+    )
+    parser.add_argument(
+        "--source",
+        type=str,
+        metavar="CODE",
+        default=None,
+        help="source language for --translate, e.g. ta (default: configured pair)",
+    )
+    parser.add_argument(
+        "--target",
+        type=str,
+        metavar="CODE",
+        default=None,
+        help="target language for --translate, e.g. en (default: configured pair)",
     )
     parser.add_argument(
         "--device",
@@ -483,6 +506,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return run_listen(container, args.listen, args.device)
         if args.benchmark:
             return run_benchmark(container, args.transcribe, args.repeats, args.language)
+        if args.translate is not None:
+            return run_translate(container, args.translate, args.source, args.target)
 
         print(f"AI Interpreter {__version__}")
         print(f"Profile: {container.selection.profile.value} ({container.selection.reason})")
@@ -493,6 +518,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("  python -m ai_interpreter --record 10       test the microphone")
         print("  python -m ai_interpreter --listen 20       live speech to text")
         print("  python -m ai_interpreter --transcribe f.wav  transcribe a file")
+        print('  python -m ai_interpreter --translate "..."  translate text')
         print("  python -m ai_interpreter --benchmark       measure decode speed")
         print("  python -m ai_interpreter --print-config    show effective settings")
         print("  python -m ai_interpreter --help            full option list")

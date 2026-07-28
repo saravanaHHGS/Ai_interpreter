@@ -277,8 +277,8 @@ talked, which the application cannot control.
 |---|---:|---:|
 | VAD endpoint (silence hangover) | 300 ms | **350 ms** |
 | Frame handoff and jitter | 15 ms | **15 ms** |
-| STT decode | 120-220 ms | **1660 ms** (Whisper `base`, 2 threads) |
-| Translation | 60-110 ms | not yet measured (Phase 5) |
+| STT decode | 120-220 ms | **1660 ms** (Whisper `base`) / **~2000 ms tail** (IndicConformer chunked streaming) |
+| Translation | 60-110 ms | **190-1300 ms** (IndicTrans2 int8, beam 4; **0 ms** on cache hit) |
 | TTS first chunk | 80-140 ms | not yet measured (Phase 6) |
 | Output buffer to the virtual cable | 40-60 ms | 60 ms |
 | **Total** | **≈ 0.65-0.9 s** | **≥ 2.0 s already** |

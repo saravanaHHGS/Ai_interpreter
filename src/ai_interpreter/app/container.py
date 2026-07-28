@@ -37,6 +37,7 @@ from pathlib import Path
 from types import TracebackType
 from typing import Self, TextIO
 
+from ai_interpreter.application.services.cached_translator import CachedTranslator
 from ai_interpreter.application.services.profile_selector import (
     ProfileSelection,
     ProfileSelector,
@@ -44,8 +45,13 @@ from ai_interpreter.application.services.profile_selector import (
 from ai_interpreter.application.services.utterance_segmenter import UtteranceSegmenter
 from ai_interpreter.domain.entities import DeviceInfo, HardwareInfo, ModelDescriptor
 from ai_interpreter.domain.errors import ConfigurationError
-from ai_interpreter.domain.ports import SpeechRecognizer, VoiceActivityDetector
-from ai_interpreter.domain.value_objects import DeviceKind, LanguageCode, SampleRate
+from ai_interpreter.domain.ports import SpeechRecognizer, Translator, VoiceActivityDetector
+from ai_interpreter.domain.value_objects import (
+    DeviceKind,
+    LanguageCode,
+    LanguagePair,
+    SampleRate,
+)
 from ai_interpreter.infrastructure.audio.capture.microphone import MicrophoneSource
 from ai_interpreter.infrastructure.audio.devices import SounddeviceDeviceEnumerator
 from ai_interpreter.infrastructure.audio.dsp import AudioPreprocessor
@@ -68,6 +74,8 @@ from ai_interpreter.infrastructure.stt.sherpa_nemo import (
     SherpaNemoStreamingRecognizer,
 )
 from ai_interpreter.infrastructure.system.hardware import HardwareProbe
+from ai_interpreter.infrastructure.translation.cache import LruTranslationCache
+from ai_interpreter.infrastructure.translation.indictrans2 import IndicTrans2Translator
 
 __all__ = ["Container"]
 
@@ -427,6 +435,59 @@ class Container:
             model_id=descriptor.id,
             language=language,
             cpu_threads=threads,
+        )
+
+    def create_translator(self, pair: LanguagePair | None = None) -> Translator:
+        """Build the translator for a direction, cache included.
+
+        Downloads the model on first use (~850 MB per direction, quantised to
+        roughly 220 MB of RAM at load).
+
+        Args:
+            pair: Direction to translate, or ``None`` for the configured
+                ``app.language_pair``.
+
+        Returns:
+            A ``Translator``; when the cache is enabled it is a
+            :class:`CachedTranslator` wrapping the engine, and callers cannot
+            tell the difference - which is the point.
+
+        Raises:
+            ConfigurationError: If the direction has no configured model.
+            ModelDownloadError: If the weights cannot be obtained.
+        """
+        chosen = pair or LanguagePair.of(
+            self.settings.app.language_pair.source,
+            self.settings.app.language_pair.target,
+        )
+        direction = "en-indic" if chosen.source.code == "en" else "indic-en"
+
+        translation = self.settings.translation
+        model_name = translation.models.get(direction)
+        if not model_name:
+            configured = ", ".join(sorted(translation.models)) or "none"
+            msg = (
+                f"No translation model configured for direction {direction!r} "
+                f"(needed for {chosen}). Configured directions: {configured}."
+            )
+            raise ConfigurationError(msg)
+
+        descriptor = self.models.get(model_name)
+        model_dir = self.model_repository.ensure(descriptor)
+
+        engine = IndicTrans2Translator(
+            model_dir=model_dir,
+            model_id=descriptor.id,
+            direction=direction,
+            cpu_threads=self.settings.stt.cpu_threads,
+            beam_size=translation.beam_size,
+            max_input_chars=translation.max_input_chars,
+        )
+        if not translation.cache.enabled:
+            return engine
+        return CachedTranslator(
+            inner=engine,
+            cache=LruTranslationCache(max_entries=translation.cache.max_entries),
         )
 
     def _resolve_stt_descriptor(self, name: str) -> ModelDescriptor:
