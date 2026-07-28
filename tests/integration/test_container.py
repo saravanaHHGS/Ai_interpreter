@@ -112,7 +112,7 @@ class TestCommandLine:
     def test_profile_flag_changes_the_result(self, capsys: pytest.CaptureFixture[str]) -> None:
         main(["--print-config", "--profile", "cuda"])
         output = capsys.readouterr().out
-        assert "provider: kokoro" in output
+        assert "device: cuda" in output
 
     def test_no_arguments_prints_guidance(self, capsys: pytest.CaptureFixture[str]) -> None:
         exit_code = main([])

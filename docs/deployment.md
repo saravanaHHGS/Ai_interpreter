@@ -70,6 +70,20 @@ Both remain available as opt-in adapters. Selecting one shows a licence
 warning in the UI. They are never selected automatically and never appear in a
 profile file.
 
+### The one exception: the Tamil voice
+
+| Component | Licence | Status |
+|---|---|---|
+| **`mms-tam`** (Facebook MMS Tamil TTS) | **CC-BY-NC 4.0 — non-commercial only** | **Default for Tamil speech output**, because it is the *only* Tamil voice that runs under constraint C6 (PyTorch blocked). Every AI4Bharat alternative is torch-only. |
+
+This is a deliberate, documented deviation from the exclusion policy above.
+The restriction is recorded in the model registry's `license` field, a
+warning is logged every time the voice loads, and any **commercial**
+distribution must either remove Tamil speech output (falling back to the
+designed on-screen captions), obtain different rights, or substitute a
+commercially licensed Tamil voice when one becomes runnable. English speech
+output (Piper, MIT) is unaffected.
+
 ### VB-CABLE — the one that catches people out
 
 VB-CABLE is **donationware and may not be redistributed.** The installer must

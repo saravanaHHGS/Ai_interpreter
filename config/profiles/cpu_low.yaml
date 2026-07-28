@@ -39,11 +39,8 @@ translation:
   # so unlike speech recognition the quality of beam search is affordable.
   beam_size: 4
 
-tts:
-  # Piper is the fastest CPU text-to-speech available and its models are
-  # ~60 MB VITS networks - roughly 10x real-time on this class of CPU.
-  provider: piper
-  device: cpu
+# tts: inherited from default.yaml - Piper English (RTF 0.29 measured on
+# this tier) and MMS Tamil, both through sherpa-onnx.
 
 pipeline:
   # One inference at a time. Oversubscribing 2 cores makes everything slower.

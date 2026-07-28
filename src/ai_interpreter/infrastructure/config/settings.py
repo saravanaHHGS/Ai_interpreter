@@ -301,21 +301,15 @@ class TtsSection(BaseModel):
     model_config = _STRICT
 
     provider: str = Field(min_length=1)
-    voice: str | None
+    # ISO 639-1 code -> model registry identifier. One voice model per
+    # language, mirroring stt.language_models: no single engine serves both
+    # sides of a Tamil/English interpreter. The output sample rate comes from
+    # the voice model itself, not from configuration.
+    voices: dict[str, str]
     device: str = Field(min_length=1)
     speed: float = Field(ge=0.5, le=2.0)
-    sample_rate: int
     streaming: bool
     sentence_split: bool
-
-    @model_validator(mode="after")
-    def _check_sample_rate(self) -> Self:
-        """Constrain the synthesis rate to a supported value."""
-        if self.sample_rate not in _ALLOWED_SAMPLE_RATES:
-            allowed = sorted(_ALLOWED_SAMPLE_RATES)
-            msg = f"tts.sample_rate must be one of {allowed}, got {self.sample_rate}"
-            raise ValueError(msg)
-        return self
 
 
 # --------------------------------------------------------------------------

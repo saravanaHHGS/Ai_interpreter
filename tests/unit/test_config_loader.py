@@ -96,7 +96,7 @@ class TestConfigLoader:
 
         assert low.stt.device == "cpu"
         assert cuda.stt.device == "cuda"
-        assert cuda.tts.provider == "kokoro"
+        assert cuda.tts.device == "cuda"
 
     def test_environment_overrides_win(self, paths: ApplicationPaths) -> None:
         environ = {"AI_INTERPRETER__STT__MODEL": "tiny"}

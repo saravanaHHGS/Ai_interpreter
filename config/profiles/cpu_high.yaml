@@ -22,9 +22,7 @@ translation:
   compute_type: int8
   beam_size: 4
 
-tts:
-  provider: piper
-  device: cpu
+# tts: inherited from default.yaml.
 
 pipeline:
   inference_lane: parallel

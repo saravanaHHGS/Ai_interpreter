@@ -440,6 +440,9 @@ class ModelDescriptor:
             Some published exports omit the metadata their runtime needs;
             these values are stamped into a patched copy after download.
             Stored as sorted key/value pairs so the descriptor stays hashable.
+        license: SPDX-style licence label, recorded so restrictions surface in
+            the UI and documentation instead of being discovered at
+            distribution time. Empty when unverified.
         local_path: Resolved path once downloaded, ``None`` beforehand.
     """
 
@@ -452,7 +455,13 @@ class ModelDescriptor:
     runtime: str
     files: tuple[str, ...] = ()
     onnx_metadata: tuple[tuple[str, str], ...] = ()
+    license: str = ""
     local_path: Path | None = field(default=None)
+
+    @property
+    def is_non_commercial(self) -> bool:
+        """Whether the recorded licence forbids commercial use."""
+        return "nc" in self.license.casefold().split("-")
 
     def supports(self, language: LanguageCode) -> bool:
         """Whether this model handles a language.

@@ -176,12 +176,27 @@ translation:
     persist: false
 
 tts:
-  provider: piper
-  # null = the provider's default voice for the target language.
-  voice: null
+  # All voices run through sherpa-onnx's VITS engine - the runtime already
+  # proven under Smart App Control for speech recognition.
+  provider: sherpa-vits
+
+  # One voice model per language (model registry identifiers), mirroring
+  # stt.language_models. Output sample rates come from the models themselves.
+  #
+  # Measured on the target machine (2 threads, warm):
+  #   piper-en-lessac    RTF 0.29   22.05 kHz  natural, the English default
+  #   piper-en-amy-low   RTF 0.18   16 kHz     faster, flatter - swap in for
+  #                                            lower latency
+  #   mms-tam            RTF 1.47   16 kHz     the ONLY runnable Tamil voice.
+  #     Slower than real time: a sentence takes ~1.5x its own duration to
+  #     synthesise, so Tamil speech output lags. License is CC-BY-NC 4.0
+  #     (non-commercial) - see docs/phases/phase-06-text-to-speech.md.
+  voices:
+    en: piper-en-lessac
+    ta: mms-tam
+
   device: cpu
   speed: 1.0
-  sample_rate: 22050
   # Emit audio sentence by sentence instead of waiting for the whole reply.
   streaming: true
   sentence_split: true

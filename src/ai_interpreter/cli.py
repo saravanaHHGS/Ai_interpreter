@@ -40,6 +40,7 @@ from ai_interpreter.app.container import Container
 from ai_interpreter.cli_audio import run_list_devices, run_record
 from ai_interpreter.cli_stt import run_benchmark, run_listen, run_transcribe
 from ai_interpreter.cli_translate import run_translate
+from ai_interpreter.cli_tts import run_speak
 from ai_interpreter.domain.errors import InterpreterError
 from ai_interpreter.infrastructure.config.settings import Profile
 from ai_interpreter.infrastructure.system.audio_endpoints import list_windows_audio_endpoints
@@ -203,6 +204,13 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="TEXT",
         default=None,
         help="translate text with the configured engine and report timings",
+    )
+    parser.add_argument(
+        "--speak",
+        type=str,
+        metavar="TEXT",
+        default=None,
+        help="synthesise text with the configured voice, save and play it",
     )
     parser.add_argument(
         "--source",
@@ -508,6 +516,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return run_benchmark(container, args.transcribe, args.repeats, args.language)
         if args.translate is not None:
             return run_translate(container, args.translate, args.source, args.target)
+        if args.speak is not None:
+            return run_speak(container, args.speak, args.language or args.target)
 
         print(f"AI Interpreter {__version__}")
         print(f"Profile: {container.selection.profile.value} ({container.selection.reason})")
@@ -519,6 +529,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("  python -m ai_interpreter --listen 20       live speech to text")
         print("  python -m ai_interpreter --transcribe f.wav  transcribe a file")
         print('  python -m ai_interpreter --translate "..."  translate text')
+        print('  python -m ai_interpreter --speak "..."      text to speech')
         print("  python -m ai_interpreter --benchmark       measure decode speed")
         print("  python -m ai_interpreter --print-config    show effective settings")
         print("  python -m ai_interpreter --help            full option list")

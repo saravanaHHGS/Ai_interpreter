@@ -192,6 +192,51 @@ models:
       - en-indic-200m-ct2/ctranslate2_model/vocab/model.SRC
       - en-indic-200m-ct2/ctranslate2_model/vocab/model.TGT
 
+  # -- Text to speech ------------------------------------------------------
+  #
+  # All voices run through sherpa-onnx's VITS engine. Piper repos declare no
+  # `files` list on purpose: their bundled espeak-ng-data directory holds
+  # hundreds of small files, so the whole snapshot is downloaded instead.
+  #
+  # Measured on the target machine (2 threads, warm):
+  #   piper-en-lessac   RTF 0.29   piper-en-amy-low  RTF 0.18
+  #   mms-tam           RTF 1.47 (fp32; int8 measured WORSE at 4.2 - this
+  #                     CPU lacks VNNI, so quantised convolutions fall back
+  #                     to slow paths)
+  piper-en-lessac:
+    task: tts
+    repo_id: csukuangfj/vits-piper-en_US-lessac-medium
+    revision: 83f7470750b36549037551ef7007fa3b4b8697e0
+    languages: ["en"]
+    size_mb: 78
+    runtime: sherpa-vits
+    license: MIT
+
+  piper-en-amy-low:
+    task: tts
+    repo_id: csukuangfj/vits-piper-en_US-amy-low
+    revision: 76da6ca287517a49f58b943c4c4fdb0c1e94d61f
+    languages: ["en"]
+    size_mb: 78
+    runtime: sherpa-vits
+    license: MIT
+
+  # The ONLY Tamil voice runnable under constraint C6 (no PyTorch): the
+  # AI4Bharat alternatives are torch-only. Facebook MMS, exported to ONNX.
+  #
+  # LICENSE WARNING: CC-BY-NC 4.0 - NON-COMMERCIAL USE ONLY. Recorded here so
+  # the restriction surfaces in the UI and documentation rather than being
+  # discovered at distribution time (deployment.md policy from Phase 1).
+  mms-tam:
+    task: tts
+    repo_id: willwade/mms-tts-multilingual-models-onnx
+    revision: 709a74aad80a840eb57f767a7f5d155aaad1ac7b
+    languages: ["ta"]
+    size_mb: 114
+    runtime: sherpa-vits
+    license: CC-BY-NC-4.0
+    files: [tam/model.onnx, tam/tokens.txt]
+
   # -- Voice activity detection -------------------------------------------
   silero-vad:
     task: vad

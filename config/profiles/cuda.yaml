@@ -28,10 +28,13 @@ translation:
   beam_size: 4
 
 tts:
-  # Kokoro-82M: Apache-2.0, natural voices, roughly 50x real-time on GPU.
-  provider: kokoro
+  # Same voices as CPU for now. Kokoro-82M (Apache-2.0, sherpa-onnx supports
+  # it) is the intended upgrade on this tier once measured on real hardware.
+  provider: sherpa-vits
+  voices:
+    en: piper-en-lessac
+    ta: mms-tam
   device: cuda
-  sample_rate: 24000
 
 pipeline:
   inference_lane: parallel

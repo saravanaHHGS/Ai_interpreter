@@ -31,6 +31,7 @@ synthesizer. No other module ever chooses an implementation.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -76,8 +77,11 @@ from ai_interpreter.infrastructure.stt.sherpa_nemo import (
 from ai_interpreter.infrastructure.system.hardware import HardwareProbe
 from ai_interpreter.infrastructure.translation.cache import LruTranslationCache
 from ai_interpreter.infrastructure.translation.indictrans2 import IndicTrans2Translator
+from ai_interpreter.infrastructure.tts.sherpa_vits import SherpaVitsSynthesizer
 
 __all__ = ["Container"]
+
+logger = logging.getLogger(__name__)
 
 # Registry identifier of the neural voice activity detector.
 _SILERO_MODEL_ID = "silero-vad"
@@ -488,6 +492,71 @@ class Container:
         return CachedTranslator(
             inner=engine,
             cache=LruTranslationCache(max_entries=translation.cache.max_entries),
+        )
+
+    def create_synthesizer(self, language: LanguageCode | None = None) -> SherpaVitsSynthesizer:
+        """Build the voice for a language.
+
+        Downloads the voice model on first use.
+
+        Args:
+            language: Language to speak, or ``None`` for the configured
+                target language.
+
+        Returns:
+            The synthesizer, not yet warmed up.
+
+        Raises:
+            ConfigurationError: If no voice is configured for the language -
+                the caller decides whether that means captions instead of
+                audio (the designed Phase 1 fallback) or a hard failure.
+            ModelDownloadError: If the voice cannot be obtained.
+        """
+        tts = self.settings.tts
+        chosen = language or LanguageCode(self.settings.app.language_pair.target)
+
+        model_name = tts.voices.get(chosen.code)
+        if not model_name:
+            configured = ", ".join(sorted(tts.voices)) or "none"
+            msg = (
+                f"No voice is configured for {chosen.english_name} ({chosen.code}). "
+                f"Configured languages: {configured}. Add an entry to tts.voices, "
+                "or fall back to on-screen captions."
+            )
+            raise ConfigurationError(msg)
+
+        descriptor = self.models.get(model_name)
+        if descriptor.is_non_commercial:
+            logger.warning(
+                "Voice %s is licensed %s - NON-COMMERCIAL use only. See "
+                "docs/deployment.md before distributing anything built on it.",
+                descriptor.id,
+                descriptor.license,
+            )
+
+        model_dir = self.model_repository.ensure(descriptor)
+        if descriptor.files:
+            model_path = model_dir / Path(descriptor.files[0]).name
+            tokens_path = model_dir / Path(descriptor.files[1]).name
+        else:
+            # Snapshot layout (Piper): one .onnx at the root plus tokens.txt.
+            onnx_files = sorted(model_dir.glob("*.onnx"))
+            if not onnx_files:
+                msg = f"No .onnx file found in the snapshot for {descriptor.id} at {model_dir}"
+                raise ConfigurationError(msg)
+            model_path = onnx_files[0]
+            tokens_path = model_dir / "tokens.txt"
+
+        espeak_dir = model_dir / "espeak-ng-data"
+        return SherpaVitsSynthesizer(
+            model_path=model_path,
+            tokens_path=tokens_path,
+            model_id=descriptor.id,
+            language=chosen,
+            data_dir=espeak_dir if espeak_dir.is_dir() else None,
+            cpu_threads=self.settings.stt.cpu_threads,
+            speed=tts.speed,
+            sentence_split=tts.sentence_split,
         )
 
     def _resolve_stt_descriptor(self, name: str) -> ModelDescriptor:
