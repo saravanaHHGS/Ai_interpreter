@@ -38,6 +38,7 @@ import yaml
 from ai_interpreter import __version__
 from ai_interpreter.app.container import Container
 from ai_interpreter.cli_audio import run_list_devices, run_record
+from ai_interpreter.cli_interpret import run_interpret
 from ai_interpreter.cli_stt import run_benchmark, run_listen, run_transcribe
 from ai_interpreter.cli_translate import run_translate
 from ai_interpreter.cli_tts import run_speak
@@ -211,6 +212,20 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="TEXT",
         default=None,
         help="synthesise text with the configured voice, save and play it",
+    )
+    parser.add_argument(
+        "--interpret",
+        type=float,
+        metavar="SECONDS",
+        default=None,
+        help="run live interpretation: mic in, translated speech out",
+    )
+    parser.add_argument(
+        "--wav",
+        type=Path,
+        metavar="FILE",
+        default=None,
+        help="for --interpret: replay a recording instead of the microphone",
     )
     parser.add_argument(
         "--out",
@@ -525,6 +540,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             return run_translate(container, args.translate, args.source, args.target)
         if args.speak is not None:
             return run_speak(container, args.speak, args.language or args.target, args.out)
+        if args.interpret is not None or args.wav is not None:
+            if args.interpret is not None and args.interpret <= 0 and args.wav is None:
+                print("--interpret needs a positive number of seconds.", file=sys.stderr)
+                return _EXIT_FAILED_CHECK
+            return run_interpret(
+                container,
+                args.interpret or 0.0,
+                args.device,
+                args.out,
+                args.wav,
+                args.source,
+                args.target,
+            )
 
         print(f"AI Interpreter {__version__}")
         print(f"Profile: {container.selection.profile.value} ({container.selection.reason})")
@@ -537,6 +565,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("  python -m ai_interpreter --transcribe f.wav  transcribe a file")
         print('  python -m ai_interpreter --translate "..."  translate text')
         print('  python -m ai_interpreter --speak "..."      text to speech')
+        print("  python -m ai_interpreter --interpret 60     LIVE INTERPRETATION")
         print("  python -m ai_interpreter --benchmark       measure decode speed")
         print("  python -m ai_interpreter --print-config    show effective settings")
         print("  python -m ai_interpreter --help            full option list")

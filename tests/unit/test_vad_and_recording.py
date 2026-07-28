@@ -225,6 +225,26 @@ class TestWavFileSource:
         assert second is not None
         assert second.timestamp_ms == pytest.approx(first.timestamp_ms + 32.0)
 
+    def test_realtime_pacing_slows_delivery(self, wav_path: Path) -> None:
+        # A paced source must take roughly wall-clock time; an unpaced one
+        # must not. Coarse bounds keep this robust on a loaded machine.
+        import time as time_module
+
+        paced = WavFileSource(wav_path, frame_ms=100, realtime=True)
+        paced.start()
+        started = time_module.monotonic()
+        for _ in range(4):  # 400 ms of audio
+            assert paced.read() is not None
+        elapsed = time_module.monotonic() - started
+        assert elapsed >= 0.25
+
+        fast = WavFileSource(wav_path, frame_ms=100)
+        fast.start()
+        started = time_module.monotonic()
+        while fast.read() is not None:
+            pass
+        assert time_module.monotonic() - started < 0.5
+
     def test_looping_never_exhausts(self, wav_path: Path) -> None:
         source = WavFileSource(wav_path, frame_ms=32, loop=True)
         source.start()

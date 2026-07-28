@@ -34,16 +34,30 @@ class WavFileSource:
         path: WAV file to replay.
         frame_ms: Block size in milliseconds, matching a microphone's.
         loop: Restart at the end instead of stopping.
+        realtime: Pace frames at wall-clock speed, as a microphone would.
+            Without pacing a 15-second file is consumed in well under a
+            second, which makes every downstream timing measurement a lie:
+            queue waits masquerade as decode time, and voice-activity state
+            flaps at replay speed. Tests keep the fast default; anything
+            *simulating* live input must pace.
 
     Raises:
         AudioCaptureError: If the file cannot be read, or its sample rate is
             not one the application supports.
     """
 
-    def __init__(self, path: Path, frame_ms: int = 20, loop: bool = False) -> None:
+    def __init__(
+        self,
+        path: Path,
+        frame_ms: int = 20,
+        loop: bool = False,
+        realtime: bool = False,
+    ) -> None:
         self._path = path
         self._frame_ms = frame_ms
         self._loop = loop
+        self._realtime = realtime
+        self._next_deadline: float | None = None
 
         samples, rate = self._load(path)
         self._samples = samples
@@ -128,6 +142,20 @@ class WavFileSource:
     def start(self) -> None:
         """Begin replay from the start of the file. Idempotent."""
         self._running = True
+        self._next_deadline = None
+
+    def _pace(self) -> None:
+        """Sleep so frames are delivered at wall-clock speed."""
+        import time
+
+        now = time.monotonic()
+        if self._next_deadline is None:
+            self._next_deadline = now
+        else:
+            delay = self._next_deadline - now
+            if delay > 0:
+                time.sleep(delay)
+        self._next_deadline += self._frame_ms / 1000.0
 
     def stop(self) -> None:
         """Stop replay. Idempotent."""
@@ -153,6 +181,9 @@ class WavFileSource:
         if not self._running:
             msg = "read() called while replay is not running; call start() first"
             raise AudioCaptureError(msg)
+
+        if self._realtime:
+            self._pace()
 
         if self._position >= self._samples.size:
             if not self._loop:
