@@ -129,18 +129,23 @@ stt:
   # Per-language model overrides.
   #
   # No single checkpoint serves both directions of a Tamil/English
-  # interpreter. Measured on one Tamil sentence against a written reference:
-  # generic `base` has ~80% word error on Tamil, and the Tamil fine-tune has
-  # lost English entirely (it refuses rather than guessing). So each language
-  # gets the model that is actually good at it, and the router loads only the
-  # models the session needs.
+  # interpreter, so each language names the model that is actually good at
+  # it. Values are model-registry identifiers (config/models.yaml); a bare
+  # Whisper size like `base` is also accepted and resolved as `whisper-base`.
+  # The runtime (CTranslate2 vs sherpa-onnx) comes from the registry entry,
+  # not from this file.
   #
-  #   ta -> tamil-small   ~0-8% error,  6-10 s   accurate but slow
-  #   en -> base          correct,      1.7 s    fast
+  # Measured on the target machine against a written Tamil reference:
+  #   indicconformer-ta    ~0-3% word error, RTF 0.55, cost LINEAR in length
+  #                        -> chunked streaming, end-of-utterance tail ~1-2 s
+  #   whisper-tamil-small  ~0-8% error but 6-10 s per utterance (fixed window)
+  #   whisper-base on ta   ~80% error - never use for Tamil
   #
-  # Remove an entry to fall back to `model` above.
+  # English default stays whisper-base (accurate finals at 1.7 s);
+  # nemo-streaming-en provides live partials and joins the pipeline in
+  # Phase 9's hybrid design.
   language_models:
-    ta: tamil-small
+    ta: indicconformer-ta
     en: base
 
   # null = models/ inside the project directory.

@@ -294,7 +294,7 @@ class TestModelRegistry:
 
     def test_unknown_model_lists_what_exists(self) -> None:
         registry = ModelRegistry.load(Path("config/models.yaml"))
-        with pytest.raises(ConfigurationError, match="Declared models: silero-vad"):
+        with pytest.raises(ConfigurationError, match=r"Declared models: .*silero-vad"):
             registry.get("no-such-model")
 
     def test_missing_file_reports_clearly(self, tmp_path: Path) -> None:

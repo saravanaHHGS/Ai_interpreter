@@ -68,6 +68,8 @@ _REQUIRED_PACKAGES: Final[tuple[tuple[str, str], ...]] = (
     ("huggingface_hub", "Phase 3 - model download"),
     ("faster_whisper", "Phase 4 - speech to text"),
     ("ctranslate2", "Phase 4 - speech to text runtime"),
+    ("sherpa_onnx", "Phase 4b - streaming speech to text"),
+    ("onnx", "Phase 4b - model metadata patching"),
 )
 
 # External programs. Missing entries are warnings, not failures: none of them

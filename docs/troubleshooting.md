@@ -212,9 +212,16 @@ Known cases, both already handled:
 |---|---|---|
 | `hf_xet` | Model download fails | Detected automatically; falls back to plain HTTPS |
 | `pysilero-vad` | ggml DLLs blocked | Not used; Silero runs via ONNX Runtime instead |
+| `torch` | Blocked outright (WinError 4551) | Constraint C6: only pre-exported ONNX / CTranslate2 models are used |
+| `librt` (mypy's runtime) | mypy fails to start | mypy pinned to 1.14.1, installed from source — pure Python, no DLL. `bootstrap.ps1` handles it |
+
+Note that verdicts can **change over time**: `librt` worked for days before
+its cloud reputation flipped and it was blocked mid-project. If a previously
+working tool suddenly reports `DLL load failed ... An Application Control
+policy has blocked this file`, this is what happened.
 
 Verified working under enforcement: `onnxruntime`, `sounddevice`, `soundfile`,
-`soxr`, `ctranslate2`.
+`soxr`, `ctranslate2`, `sherpa_onnx`, `onnx`.
 
 If a *new* library is blocked, prefer an ONNX or pure-Python alternative
 rather than disabling the policy.

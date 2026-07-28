@@ -102,6 +102,56 @@ models:
     files:
       [config.json, model.bin, preprocessor_config.json, tokenizer.json, vocabulary.json]
 
+  # AI4Bharat IndicConformer Tamil, CTC, int8 ONNX export by OpenVoiceOS.
+  #
+  # Measured against the same written Tamil reference used to score the
+  # Whisper models, on the target machine (2 threads):
+  #
+  #   whisper-tamil-small  6.2-10.5 s/utt   ~0-8% word error
+  #   indicconformer-ta    RTF 0.55         ~0-3% word error  <- better AND faster
+  #
+  # Decode cost is LINEAR in audio length (533 ms per second of audio),
+  # which is what makes chunked incremental decoding - and therefore true
+  # streaming on CPU - possible. See docs/architecture.md section 0.
+  #
+  # The export ships without the metadata sherpa-onnx requires, so the
+  # values below are stamped into a patched copy after download (a
+  # consequence of constraint C6: PyTorch is blocked on the target machine,
+  # making a proper re-export impossible locally).
+  #
+  # files[0] is the model, files[1] the token table - the loader relies on
+  # this ordering.
+  indicconformer-ta:
+    task: stt
+    repo_id: OpenVoiceOS/ai4bharat-indicconformer-ta-onnx
+    revision: 10e43940d12106763c3aebe1922b70d37fc0c6fd
+    languages: ["ta"]
+    size_mb: 138
+    runtime: sherpa-nemo-ctc
+    files: [model.int8.onnx, vocab.txt]
+    onnx_metadata:
+      vocab_size: "257"
+      normalize_type: per_feature
+      subsampling_factor: "4"
+      model_type: EncDecCTCModelBPE
+      version: "1"
+      model_author: ai4bharat
+
+  # NVIDIA NeMo streaming fast-conformer CTC, English, 480 ms chunks, int8.
+  # A genuinely incremental model: partial text appears while audio is still
+  # arriving. Measured RTF 0.110 on 2 threads. First-sentence accuracy was
+  # perfect on the reference recording; later sentences degraded on accented
+  # conversational speech, so whisper-base remains the English default until
+  # the hybrid partials+finals design lands in Phase 9.
+  nemo-streaming-en:
+    task: stt
+    repo_id: csukuangfj/sherpa-onnx-nemo-streaming-fast-conformer-ctc-en-480ms-int8
+    revision: 66e9b61a9fe334eba579700599e391c6ee093633
+    languages: ["en"]
+    size_mb: 132
+    runtime: sherpa-nemo-ctc-streaming
+    files: [model.int8.onnx, tokens.txt]
+
   # -- Voice activity detection -------------------------------------------
   silero-vad:
     task: vad

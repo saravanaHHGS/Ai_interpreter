@@ -436,6 +436,10 @@ class ModelDescriptor:
         runtime: Runtime that executes it, e.g. ``"ctranslate2"``, ``"onnx"``.
         files: Repository-relative files required, e.g. ``("onnx/model.onnx",)``.
             Empty means the whole repository snapshot is needed.
+        onnx_metadata: Metadata keys a runtime requires inside the ONNX file.
+            Some published exports omit the metadata their runtime needs;
+            these values are stamped into a patched copy after download.
+            Stored as sorted key/value pairs so the descriptor stays hashable.
         local_path: Resolved path once downloaded, ``None`` beforehand.
     """
 
@@ -447,6 +451,7 @@ class ModelDescriptor:
     size_mb: int
     runtime: str
     files: tuple[str, ...] = ()
+    onnx_metadata: tuple[tuple[str, str], ...] = ()
     local_path: Path | None = field(default=None)
 
     def supports(self, language: LanguageCode) -> bool:

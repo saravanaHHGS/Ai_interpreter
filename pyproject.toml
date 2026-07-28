@@ -44,6 +44,8 @@ dependencies = [
     "huggingface-hub>=0.27,<2",  # model download with revision pinning
     # Phase 4 - speech to text
     "faster-whisper>=1.1,<2",  # Whisper on CTranslate2: int8, low memory
+    "sherpa-onnx>=1.12,<2",    # NeMo conformer CTC: linear-cost, streaming-capable
+    "onnx>=1.17,<2",           # metadata patching for exports missing sherpa keys
 ]
 
 [project.optional-dependencies]
@@ -52,7 +54,11 @@ dev = [
     "pytest-cov>=6.0,<8",
     "pytest-asyncio>=0.24,<2",
     "ruff>=0.8,<1",
-    "mypy>=1.13,<2",
+    # Pinned below 1.15 and installed from source (see scripts/bootstrap.ps1):
+    # newer mypy depends on the compiled `librt` runtime, whose DLL Windows
+    # Smart App Control blocks on the target machine - a cloud-reputation
+    # verdict that flipped mid-project. Pure-Python mypy has no DLL to block.
+    "mypy==1.14.1",
     "types-PyYAML>=6.0.2,<7",
 ]
 
@@ -141,6 +147,8 @@ module = [
     "hf_xet.*",
     "faster_whisper.*",
     "ctranslate2.*",
+    "sherpa_onnx.*",
+    "onnx.*",
 ]
 ignore_missing_imports = true
 

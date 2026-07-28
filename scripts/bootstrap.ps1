@@ -60,6 +60,13 @@ Write-Host 'Installing build tools...' -ForegroundColor Cyan
 & $python -m pip install setuptools wheel --quiet --disable-pip-version-check
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+# -- 3b. mypy must come from source on this machine --------------------------
+# Smart App Control blocks the compiled DLLs of newer mypy's `librt` runtime.
+# Installing mypy from its sdist produces a pure-Python build with no DLL at
+# all. Done before the main install so pip does not fetch the binary wheel.
+& $python -m pip install --no-binary mypy "mypy==1.14.1" --quiet --disable-pip-version-check
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
 # -- 4. Install the project -------------------------------------------------
 if ($Locked) {
     Write-Host 'Installing exact pinned versions from requirements.lock.txt ...' -ForegroundColor Cyan

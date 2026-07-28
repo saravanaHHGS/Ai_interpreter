@@ -147,9 +147,10 @@ def run_transcribe(container: Container, wav_path: Path, language: str | None) -
         started = time.perf_counter()
         recognizer.warmup()
         row("Warmup", f"{(time.perf_counter() - started) * 1000.0:.0f} ms")
-        row("Language", str(recognizer.language or "auto-detect"))
+        decode_language = getattr(recognizer, "language", None)
+        row("Language", str(decode_language or "auto-detect"))
 
-        utterances = _load_utterances(container, wav_path, chosen)
+        utterances = _load_utterances(container, wav_path, chosen or decode_language)
     except InterpreterError as exc:
         print(f"\n{exc}\n", file=sys.stderr)
         return _EXIT_ERROR
@@ -171,7 +172,7 @@ def run_transcribe(container: Container, wav_path: Path, language: str | None) -
 
     heading("Summary")
     row("Utterances", str(len(utterances)))
-    row("Mean decode time", f"{recognizer.mean_decode_ms:.0f} ms")
+    row("Mean decode time", f"{getattr(recognizer, 'mean_decode_ms', 0.0):.0f} ms")
     return _EXIT_OK
 
 
@@ -204,16 +205,15 @@ def run_listen(container: Container, seconds: float, device_name: str | None) ->
         print("\n  Loading model...")
         recognizer = container.create_recognizer()
         recognizer.warmup()
-        row("Language", str(recognizer.language or "auto-detect"))
+        decode_language = getattr(recognizer, "language", None)
+        row("Language", str(decode_language or "auto-detect"))
 
         source = container.create_microphone_source(device)
         preprocessor = container.create_preprocessor(
             SampleRate(container.settings.audio.input.sample_rate)
         )
         vad = container.create_vad()
-        segmenter = container.create_segmenter(
-            SampleRate(_MODEL_RATE), language=recognizer.language
-        )
+        segmenter = container.create_segmenter(SampleRate(_MODEL_RATE), language=decode_language)
     except InterpreterError as exc:
         print(f"\n{exc}\n", file=sys.stderr)
         return _EXIT_ERROR

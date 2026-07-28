@@ -42,9 +42,9 @@ from ai_interpreter.application.services.profile_selector import (
     ProfileSelector,
 )
 from ai_interpreter.application.services.utterance_segmenter import UtteranceSegmenter
-from ai_interpreter.domain.entities import DeviceInfo, HardwareInfo
+from ai_interpreter.domain.entities import DeviceInfo, HardwareInfo, ModelDescriptor
 from ai_interpreter.domain.errors import ConfigurationError
-from ai_interpreter.domain.ports import VoiceActivityDetector
+from ai_interpreter.domain.ports import SpeechRecognizer, VoiceActivityDetector
 from ai_interpreter.domain.value_objects import DeviceKind, LanguageCode, SampleRate
 from ai_interpreter.infrastructure.audio.capture.microphone import MicrophoneSource
 from ai_interpreter.infrastructure.audio.devices import SounddeviceDeviceEnumerator
@@ -61,6 +61,11 @@ from ai_interpreter.infrastructure.paths import ApplicationPaths
 from ai_interpreter.infrastructure.stt.faster_whisper import (
     FasterWhisperRecognizer,
     WhisperDecodeOptions,
+)
+from ai_interpreter.infrastructure.stt.onnx_metadata import ensure_onnx_metadata
+from ai_interpreter.infrastructure.stt.sherpa_nemo import (
+    SherpaNemoCtcRecognizer,
+    SherpaNemoStreamingRecognizer,
 )
 from ai_interpreter.infrastructure.system.hardware import HardwareProbe
 
@@ -292,10 +297,13 @@ class Container:
         """
         return LanguageCode(self.settings.app.language_pair.source)
 
-    def create_recognizer(self, language: LanguageCode | None = None) -> FasterWhisperRecognizer:
-        """Build the speech recogniser named in configuration.
+    def create_recognizer(self, language: LanguageCode | None = None) -> SpeechRecognizer:
+        """Build the speech recogniser for a language.
 
-        Downloads the model on first use.
+        Downloads the model on first use, and dispatches on the model's
+        declared ``runtime`` - CTranslate2 Whisper and sherpa-onnx NeMo
+        conformers are constructed from the same registry entry format, so
+        adding a runtime touches this method and nothing else.
 
         Args:
             language: Language to decode, overriding configuration. ``None``
@@ -307,20 +315,42 @@ class Container:
             timing anything, or the first decode pays the initialisation cost.
 
         Raises:
-            ConfigurationError: If the provider or model name is unknown.
+            ConfigurationError: If the model name or runtime is unknown.
             ModelDownloadError: If the weights cannot be obtained.
+            ModelLoadError: If an ONNX model needs metadata patching and the
+                patch fails.
         """
         stt = self.settings.stt
-        provider = stt.provider.strip().lower()
-        if provider != "faster_whisper":
-            msg = f"Unknown stt.provider {stt.provider!r}. Valid: faster_whisper"
-            raise ConfigurationError(msg)
-
         chosen = language
         if chosen is None:
             chosen = LanguageCode(stt.language) if stt.language else self.source_language()
 
-        descriptor = self.models.get(f"whisper-{self._model_name_for(chosen)}")
+        descriptor = self._resolve_stt_descriptor(self._model_name_for(chosen))
+
+        if descriptor.runtime == "ctranslate2":
+            return self._create_whisper(descriptor, chosen)
+        if descriptor.runtime in ("sherpa-nemo-ctc", "sherpa-nemo-ctc-streaming"):
+            return self._create_sherpa(descriptor, chosen)
+
+        msg = (
+            f"Model {descriptor.id!r} declares unknown runtime {descriptor.runtime!r}. "
+            "Known: ctranslate2, sherpa-nemo-ctc, sherpa-nemo-ctc-streaming"
+        )
+        raise ConfigurationError(msg)
+
+    def _create_whisper(
+        self, descriptor: ModelDescriptor, language: LanguageCode
+    ) -> FasterWhisperRecognizer:
+        """Build a CTranslate2 Whisper recogniser.
+
+        Args:
+            descriptor: Registry entry with runtime ``ctranslate2``.
+            language: Language to decode.
+
+        Returns:
+            The recogniser.
+        """
+        stt = self.settings.stt
         model_dir = self.model_repository.ensure(descriptor)
 
         # "*" means the full multilingual set; anything else is a fine-tune
@@ -333,7 +363,7 @@ class Container:
             device=stt.device,
             compute_type=stt.compute_type,
             cpu_threads=stt.cpu_threads,
-            language=chosen,
+            language=language,
             options=WhisperDecodeOptions(
                 beam_size=stt.beam_size,
                 word_timestamps=stt.word_timestamps,
@@ -341,6 +371,83 @@ class Container:
             ),
             supported_languages=supported,
         )
+
+    def _create_sherpa(
+        self, descriptor: ModelDescriptor, language: LanguageCode
+    ) -> SpeechRecognizer:
+        """Build a sherpa-onnx NeMo conformer recogniser.
+
+        Args:
+            descriptor: Registry entry with a ``sherpa-nemo-ctc*`` runtime.
+            language: Language to decode; must be one the model serves.
+
+        Returns:
+            The offline chunked recogniser or the online streaming one,
+            depending on the declared runtime.
+
+        Raises:
+            ConfigurationError: If the language is not served, or the entry
+                does not name its model and token files.
+        """
+        if not descriptor.supports(language):
+            msg = (
+                f"Model {descriptor.id!r} does not support {language.english_name}; "
+                f"it serves: {', '.join(descriptor.languages)}"
+            )
+            raise ConfigurationError(msg)
+        if len(descriptor.files) < 2:
+            msg = (
+                f"Model {descriptor.id!r} must list its model file and token table "
+                "in 'files' (in that order)"
+            )
+            raise ConfigurationError(msg)
+
+        model_path = self.model_repository.ensure_file(descriptor, descriptor.files[0])
+        tokens_path = self.model_repository.ensure_file(descriptor, descriptor.files[1])
+
+        if descriptor.onnx_metadata:
+            model_path = ensure_onnx_metadata(
+                source=model_path,
+                patched_dir=self.paths.models_dir / "patched" / descriptor.id,
+                required=dict(descriptor.onnx_metadata),
+            )
+
+        threads = self.settings.stt.cpu_threads
+        if descriptor.runtime == "sherpa-nemo-ctc-streaming":
+            return SherpaNemoStreamingRecognizer(
+                model_path=model_path,
+                tokens_path=tokens_path,
+                model_id=descriptor.id,
+                language=language,
+                cpu_threads=threads,
+            )
+        return SherpaNemoCtcRecognizer(
+            model_path=model_path,
+            tokens_path=tokens_path,
+            model_id=descriptor.id,
+            language=language,
+            cpu_threads=threads,
+        )
+
+    def _resolve_stt_descriptor(self, name: str) -> ModelDescriptor:
+        """Look up a speech model, accepting bare Whisper size names.
+
+        ``stt.model: base`` predates the multi-runtime registry and remains
+        supported: a name with no direct entry is retried as ``whisper-<name>``.
+
+        Args:
+            name: Registry identifier or bare Whisper size.
+
+        Returns:
+            The descriptor.
+
+        Raises:
+            ConfigurationError: If neither form is declared.
+        """
+        try:
+            return self.models.get(name)
+        except ConfigurationError:
+            return self.models.get(f"whisper-{name}")
 
     def describe_model_for(self, language: LanguageCode | None) -> str:
         """Name the checkpoint that would serve a language, for display.
@@ -357,7 +464,7 @@ class Container:
             if self.settings.stt.language
             else self.source_language()
         )
-        return f"whisper-{self._model_name_for(chosen)}"
+        return self._resolve_stt_descriptor(self._model_name_for(chosen)).id
 
     def _model_name_for(self, language: LanguageCode | None) -> str:
         """Resolve which Whisper checkpoint serves a language.

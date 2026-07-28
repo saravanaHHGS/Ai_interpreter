@@ -224,6 +224,63 @@ before any of them is chosen.
 
 ---
 
+## Phase 4b — the streaming-capable recognisers
+
+Added after the CPU-only and true-streaming constraints were fixed, and after
+the model experiment (see `docs/architecture.md` section 0) found engines
+whose cost scales with audio length.
+
+### What was built
+
+| Piece | File | Purpose |
+|---|---|---|
+| `SherpaNemoCtcRecognizer` | `infrastructure/stt/sherpa_nemo.py` | Tamil IndicConformer. Whole-utterance decode plus **chunked incremental streaming** |
+| `SherpaNemoStreamingRecognizer` | same | NeMo streaming English conformer, natively incremental |
+| `ensure_onnx_metadata` | `infrastructure/stt/onnx_metadata.py` | Stamps sherpa-required metadata into a copy of exports that ship without it |
+| Runtime dispatch | `app/container.py` | One factory; the registry entry's `runtime` field selects CTranslate2 vs sherpa-onnx |
+
+### The chunked commitment algorithm
+
+The piece that converts a linear-cost model into low end-of-utterance
+latency. Audio buffers until one chunk (4 s) plus a safety margin (0.8 s) is
+held; the buffer is decoded; tokens whose timestamps fall safely before the
+right edge are **committed at a word boundary** (the sentencepiece `▁`
+marker) and their audio is discarded. Each decode therefore covers roughly
+one chunk, and at end of utterance only the final chunk remains — a tail of
+about `chunk x RTF ≈ 2 s`, versus 6–10 s for a whole-utterance Whisper
+decode.
+
+The margin exists because CTC output near the right edge has not seen its
+right context and is still allowed to change; committing it would bake in
+errors. Commitment only at `▁` boundaries prevents a Tamil word from being
+split across two partials.
+
+### Verified end to end on the reference recording
+
+```
+Model      indicconformer-ta (int8)     Warmup  2.7 s
+[1] 6.72 s -> 4.6 s   என் பெயர் சரவணகுமார் இன்று நான் தமிழ் குரல்
+                      அடையாளம் சரியாக செயல்படுகிறதா என்று சோதித்து வருகின்றேன்
+[2] 1.73 s -> 1.2 s   இந்த மென்பொருள் என் குரலை        <- exact
+```
+
+Utterance 2 is an exact match to the written reference; utterance 1 differs
+only in a colloquial verb ending. `--transcribe` uses the whole-utterance
+path; the chunked streaming path is wired into the live pipeline in Phase 9.
+
+### Notes
+
+* Sherpa's greedy CTC exposes no token probabilities, so these transcripts
+  carry an availability flag (1.0/0.0), not a model-certainty estimate —
+  documented on the adapter, and consistent with Phase 4's finding that even
+  real confidence values invert on failure modes.
+* Smart App Control's cloud verdict on mypy's compiled `librt` runtime
+  flipped mid-project, blocking a tool that worked hours earlier. mypy is now
+  pinned to 1.14.1 and installed from source (pure Python, no DLL to block);
+  `bootstrap.ps1` does this automatically.
+
+---
+
 ## What Phase 5 adds
 
 Translation: IndicTrans2-200M for Tamil and Hindi to English, behind a
