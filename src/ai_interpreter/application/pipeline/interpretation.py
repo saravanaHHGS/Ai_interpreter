@@ -54,6 +54,10 @@ from dataclasses import dataclass, field, replace
 from typing import TypeVar
 
 from ai_interpreter.application.services.capture_session import CaptureSession
+from ai_interpreter.application.services.code_switch import (
+    english_phonetic_score,
+    flag_english_tokens,
+)
 from ai_interpreter.application.services.glossary import GlossaryRewriter
 from ai_interpreter.application.services.utterance_segmenter import SegmenterState
 from ai_interpreter.domain.entities import Transcript, Translation, Utterance
@@ -117,6 +121,8 @@ class PipelineStats:
         dropped_empty: Utterances whose transcript or translation was empty.
         failures: Utterances dropped after retries were exhausted.
         barge_ins: Times playing audio was cleared by new speech.
+        code_switch_reroutes: Utterances rescued by the English fallback
+            because their "Tamil" transcript was phonotactically English.
         timings: Per-utterance latency records, in completion order.
     """
 
@@ -126,6 +132,7 @@ class PipelineStats:
     dropped_empty: int
     failures: int
     barge_ins: int
+    code_switch_reroutes: int
     timings: tuple[UtteranceTiming, ...]
 
 
@@ -161,6 +168,7 @@ class _Counters:
     dropped_empty: int = 0
     failures: int = 0
     barge_ins: int = 0
+    code_switch_reroutes: int = 0
     timings: list[UtteranceTiming] = field(default_factory=list)
 
 
@@ -185,6 +193,14 @@ class InterpretationPipeline:
         glossary: Term-recovery rewriter applied to transcripts before
             translation, or ``None``. This is where code-switched English and
             technical terms mangled by the Tamil-only recogniser are repaired.
+        english_fallback: Recogniser for the *target* language, used to
+            rescue utterances the source-language model rendered as phonetic
+            soup - an English sentence spoken into the Tamil-only model. Only
+            consulted when the transcript is phonotactically English-heavy;
+            its text then bypasses translation entirely.
+        fallback_min_score: Flagged-word fraction (with at least two flagged
+            words) that triggers the rescue; half the utterance flagged
+            always triggers.
         queue_maxsize: Utterances buffered before drop-oldest engages.
         max_retries: Per-stage retries before an utterance is dropped.
         retry_backoff_s: Pause before a retry.
@@ -200,6 +216,8 @@ class InterpretationPipeline:
         pair: LanguagePair,
         events: PipelineEvents | None = None,
         glossary: GlossaryRewriter | None = None,
+        english_fallback: SpeechRecognizer | None = None,
+        fallback_min_score: float = 0.3,
         queue_maxsize: int = 2,
         max_retries: int = 1,
         retry_backoff_s: float = 0.25,
@@ -212,6 +230,8 @@ class InterpretationPipeline:
         self._pair = pair
         self._events = events or PipelineEvents()
         self._glossary = glossary
+        self._english_fallback = english_fallback
+        self._fallback_min_score = fallback_min_score
         self._queue_maxsize = queue_maxsize
         self._max_retries = max_retries
         self._retry_backoff_s = retry_backoff_s
@@ -292,6 +312,7 @@ class InterpretationPipeline:
                 dropped_empty=self._counters.dropped_empty,
                 failures=self._counters.failures,
                 barge_ins=self._counters.barge_ins,
+                code_switch_reroutes=self._counters.code_switch_reroutes,
                 timings=tuple(self._counters.timings),
             )
 
@@ -387,6 +408,43 @@ class InterpretationPipeline:
                 logger.debug("Glossary rewrote transcript for %s", utterance.id)
                 transcript = replace(transcript, text=rewritten)
 
+        # Code-switch rescue: an English sentence spoken into the Tamil-only
+        # model comes out as phonetic soup. When the transcript is
+        # phonotactically English-heavy, re-recognise with the target-language
+        # model and use that text directly - no translation needed.
+        direct_translation: Translation | None = None
+        if (
+            self._english_fallback is not None
+            and not transcript.is_empty
+            and self._pair.target.code == "en"
+        ):
+            flags = flag_english_tokens(transcript.text)
+            score = english_phonetic_score(transcript.text)
+            if score >= 0.5 or (len(flags) >= 2 and score >= self._fallback_min_score):
+                logger.debug(
+                    "Code-switch rescue for %s (score %.2f, flags %d)",
+                    utterance.id,
+                    score,
+                    len(flags),
+                )
+                english = self._with_retries(
+                    "stt-fallback",
+                    lambda: self._english_fallback.transcribe(  # type: ignore[union-attr]
+                        replace(utterance, language=self._pair.target)
+                    ),
+                )
+                if english is not None and not english.is_empty:
+                    with self._lock:
+                        self._counters.code_switch_reroutes += 1
+                    direct_translation = Translation(
+                        utterance_id=utterance.id,
+                        source_text=transcript.text,
+                        translated_text=english.text,
+                        pair=self._pair,
+                        model_id=f"{english.model_id}+direct",
+                    )
+                    transcript = english
+
         if self._events.on_transcript is not None:
             self._events.on_transcript(transcript)
         if transcript.is_empty:
@@ -394,7 +452,7 @@ class InterpretationPipeline:
                 self._counters.dropped_empty += 1
             return
 
-        translation = self._with_retries(
+        translation = direct_translation or self._with_retries(
             "mt", lambda: self._translator.translate(transcript.text, self._pair)
         )
         if translation is None:

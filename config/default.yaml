@@ -148,6 +148,22 @@ stt:
     ta: indicconformer-ta
     en: base
 
+  # Code-switch rescue. The Tamil recogniser's vocabulary is Tamil-only, so
+  # an ENGLISH sentence spoken into it comes out as phonetic Tamil soup
+  # ("இ பஸ் கன் கிரெட் மோர் பிரான்ச" for "e-bus can create more branches").
+  # Those transliterations violate Tamil phonotactics detectably - native
+  # words never start with consonant clusters (ட்ர), contain ஃப (/f/), or
+  # end in a stop (கிரெட்). When enough of an utterance is flagged, it is
+  # re-recognised with the English model and that text is used directly,
+  # skipping translation. Costs ~1.7 s extra, only on triggered utterances.
+  #
+  # Single English words inside Tamil sentences do NOT trigger this - they
+  # stay on the glossary path (translation.glossary).
+  code_switch_fallback: true
+  # Reroute when at least this fraction of words is flagged (with a minimum
+  # of two flagged words), or when half the utterance is flagged.
+  code_switch_min_score: 0.3
+
   # null = models/ inside the project directory.
   download_root: null
 

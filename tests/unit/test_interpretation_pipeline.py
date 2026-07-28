@@ -483,6 +483,127 @@ class TestGlossary:
         assert received == ["world status u1"]
 
 
+class TestCodeSwitchRescue:
+    """English-heavy 'Tamil' transcripts rerouted to the English model."""
+
+    ENGLISH_SOUP = "இ பஸ் கன் கிரெட் மோர் பிரான்ச"  # real session output
+
+    @staticmethod
+    def _soup_recognizer() -> FakeRecognizer:
+        class SoupRecognizer(FakeRecognizer):
+            def transcribe(self, utterance: Utterance) -> Transcript:
+                self.calls += 1
+                return Transcript(
+                    utterance_id=utterance.id,
+                    text=TestCodeSwitchRescue.ENGLISH_SOUP,
+                    language=TAMIL,
+                    confidence=Confidence(0.9),
+                    is_final=True,
+                )
+
+        return SoupRecognizer()
+
+    @staticmethod
+    def _english_recognizer(text: str = "the bus can create more branches") -> FakeRecognizer:
+        class EnglishRecognizer(FakeRecognizer):
+            def transcribe(self, utterance: Utterance) -> Transcript:
+                self.calls += 1
+                assert utterance.language == ENGLISH  # rerouted with en tag
+                return Transcript(
+                    utterance_id=utterance.id,
+                    text=text,
+                    language=ENGLISH,
+                    confidence=Confidence(0.8),
+                    is_final=True,
+                )
+
+        return EnglishRecognizer()
+
+    def test_soup_is_rescued_and_translation_is_skipped(self) -> None:
+        translator = FakeTranslator()
+        fallback = self._english_recognizer()
+        translations: list[Translation] = []
+        transcripts: list[Transcript] = []
+        capture = FakeCapture()
+        pipeline = InterpretationPipeline(
+            capture=capture,  # type: ignore[arg-type]
+            recognizer=self._soup_recognizer(),
+            translator=translator,
+            synthesizer=None,
+            sink=None,
+            pair=PAIR,
+            english_fallback=fallback,
+            events=PipelineEvents(
+                on_transcript=transcripts.append,
+                on_translation=translations.append,
+            ),
+        )
+        pipeline.start()
+        try:
+            pipeline.submit_utterance(_utterance("u1"))
+            _wait_done(pipeline, 1)
+        finally:
+            pipeline.stop()
+
+        assert fallback.calls == 1
+        assert translator.calls == 0  # translation bypassed entirely
+        assert transcripts[0].text == "the bus can create more branches"
+        assert transcripts[0].language == ENGLISH
+        assert translations[0].translated_text == "the bus can create more branches"
+        assert translations[0].source_text == self.ENGLISH_SOUP
+        assert translations[0].model_id.endswith("+direct")
+        assert pipeline.stats().code_switch_reroutes == 1
+
+    def test_pure_tamil_never_triggers_the_fallback(self) -> None:
+        fallback = self._english_recognizer()
+        translator = FakeTranslator()
+        capture = FakeCapture()
+        pipeline = InterpretationPipeline(
+            capture=capture,  # type: ignore[arg-type]
+            recognizer=FakeRecognizer(text_prefix="நாளைக்கு என்ன பண்ணனும்"),
+            translator=translator,
+            synthesizer=None,
+            sink=None,
+            pair=PAIR,
+            english_fallback=fallback,
+        )
+        pipeline.start()
+        try:
+            pipeline.submit_utterance(_utterance("u1"))
+            _wait_done(pipeline, 1)
+        finally:
+            pipeline.stop()
+
+        assert fallback.calls == 0
+        assert translator.calls == 1
+        assert pipeline.stats().code_switch_reroutes == 0
+
+    def test_empty_fallback_result_falls_back_to_translation(self) -> None:
+        fallback = self._english_recognizer(text="")
+        translator = FakeTranslator()
+        capture = FakeCapture()
+        pipeline = InterpretationPipeline(
+            capture=capture,  # type: ignore[arg-type]
+            recognizer=self._soup_recognizer(),
+            translator=translator,
+            synthesizer=None,
+            sink=None,
+            pair=PAIR,
+            english_fallback=fallback,
+        )
+        pipeline.start()
+        try:
+            pipeline.submit_utterance(_utterance("u1"))
+            _wait_done(pipeline, 1)
+        finally:
+            pipeline.stop()
+
+        # The rescue found nothing; the normal Tamil->English path proceeds.
+        assert fallback.calls == 1
+        assert translator.calls == 1
+        assert pipeline.stats().code_switch_reroutes == 0
+
+
 class TestBargeIn:
     """New speech silences the interpreter."""
 

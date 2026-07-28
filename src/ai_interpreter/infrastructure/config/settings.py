@@ -266,6 +266,12 @@ class SttSection(BaseModel):
     min_confidence: Probability
     # ISO 639-1 code -> model name. Empty means every language uses `model`.
     language_models: dict[str, str]
+    # When a "Tamil" transcript is phonotactically mostly English (the
+    # Tamil-only recogniser transliterating an English sentence), re-recognise
+    # the utterance with the English model and use its text directly.
+    code_switch_fallback: bool
+    # Minimum flagged fraction (with at least two flagged words) to reroute.
+    code_switch_min_score: Probability
 
 
 class TranslationCacheSection(BaseModel):

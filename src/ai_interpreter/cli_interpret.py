@@ -26,6 +26,7 @@ from ai_interpreter.application.pipeline.interpretation import (
     UtteranceTiming,
 )
 from ai_interpreter.application.services.capture_session import CaptureSession
+from ai_interpreter.application.services.code_switch import flag_english_tokens
 from ai_interpreter.application.services.glossary import GlossaryRewriter
 from ai_interpreter.domain.entities import Transcript, Translation
 from ai_interpreter.domain.errors import ConfigurationError, InterpreterError
@@ -151,9 +152,13 @@ def run_interpret(
         print(f"\n{exc}\n", file=sys.stderr)
         return _EXIT_ERROR
 
+    flagged_terms: list[str] = []
+
     def on_transcript(transcript: Transcript) -> None:
         if not transcript.is_empty:
-            print(f"\n  [{pair.source.code}] {transcript.text}")
+            print(f"\n  [{transcript.language.code}] {transcript.text}")
+            if transcript.language == pair.source:
+                flagged_terms.extend(flag_english_tokens(transcript.text))
 
     def on_translation(translation: Translation) -> None:
         cached = "  (cached)" if translation.from_cache else ""
@@ -174,6 +179,24 @@ def run_interpret(
     if glossary is not None:
         row("Glossary", f"{glossary.size} term variant(s) active")
 
+    english_fallback = None
+    if (
+        container.settings.stt.code_switch_fallback
+        and pair.target.code == "en"
+        and pair.source.code != "en"
+    ):
+        try:
+            english_fallback = container.create_recognizer(pair.target)
+            english_fallback.warmup()
+            row(
+                "Code-switch rescue",
+                f"{container.describe_model_for(pair.target)} - English-heavy "
+                "utterances are re-recognised in English",
+            )
+        except InterpreterError as exc:
+            logger.warning("Code-switch fallback unavailable: %s", exc)
+            english_fallback = None
+
     pipeline = InterpretationPipeline(
         capture=capture,
         recognizer=recognizer,
@@ -182,6 +205,8 @@ def run_interpret(
         sink=sink,
         pair=pair,
         glossary=glossary,
+        english_fallback=english_fallback,
+        fallback_min_score=container.settings.stt.code_switch_min_score,
         events=PipelineEvents(
             on_transcript=on_transcript,
             on_translation=on_translation,
@@ -208,10 +233,12 @@ def run_interpret(
         pipeline.stop()
         recognizer.close()
         translator.close()
+        if english_fallback is not None:
+            english_fallback.close()
         if synthesizer is not None:
             synthesizer.close()
 
-    return _summarise(pipeline, container)
+    return _summarise(pipeline, container, flagged_terms)
 
 
 def _wait(
@@ -246,12 +273,18 @@ def _wait(
         time.sleep(0.2)
 
 
-def _summarise(pipeline: InterpretationPipeline, container: Container) -> int:
+def _summarise(
+    pipeline: InterpretationPipeline,
+    container: Container,
+    flagged_terms: list[str] | None = None,
+) -> int:
     """Print the run summary.
 
     Args:
         pipeline: The stopped pipeline.
         container: For configuration context in the report.
+        flagged_terms: English-looking tokens seen in source transcripts,
+            turned into ready-to-paste glossary suggestions.
 
     Returns:
         Process exit code.
@@ -264,6 +297,7 @@ def _summarise(pipeline: InterpretationPipeline, container: Container) -> int:
     row("Dropped (empty)", str(stats.dropped_empty))
     row("Failures", str(stats.failures))
     row("Barge-ins", str(stats.barge_ins))
+    row("Code-switch rescues", str(stats.code_switch_reroutes))
 
     if stats.timings:
         latencies = sorted(t.eou_to_first_audio_ms for t in stats.timings)
@@ -277,5 +311,15 @@ def _summarise(pipeline: InterpretationPipeline, container: Container) -> int:
             "Perceived (incl. endpoint)",
             f"{endpoint + mean:.0f} ms after you stop speaking",
         )
+
+    unique_terms = sorted(set(flagged_terms or []))
+    if unique_terms:
+        heading("Glossary suggestions")
+        print("  These words look like English rendered in Tamil script. To have")
+        print("  them recovered every time, add entries under translation.glossary")
+        print("  (put the intended English term on the left):")
+        print()
+        for term in unique_terms:
+            print(f'    your-term-here: ["{term}"]')
 
     return _EXIT_OK if stats.failures == 0 else _EXIT_ERROR
