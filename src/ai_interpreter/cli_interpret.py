@@ -26,6 +26,7 @@ from ai_interpreter.application.pipeline.interpretation import (
     UtteranceTiming,
 )
 from ai_interpreter.application.services.capture_session import CaptureSession
+from ai_interpreter.application.services.glossary import GlossaryRewriter
 from ai_interpreter.domain.entities import Transcript, Translation
 from ai_interpreter.domain.errors import ConfigurationError, InterpreterError
 from ai_interpreter.domain.ports import AudioSink, SpeechSynthesizer
@@ -168,6 +169,11 @@ def run_interpret(
     def on_error(stage: str, exc: Exception) -> None:
         print(f"  [error in {stage}] {exc}", file=sys.stderr)
 
+    glossary_terms = container.settings.translation.glossary
+    glossary = GlossaryRewriter(glossary_terms) if glossary_terms else None
+    if glossary is not None:
+        row("Glossary", f"{glossary.size} term variant(s) active")
+
     pipeline = InterpretationPipeline(
         capture=capture,
         recognizer=recognizer,
@@ -175,6 +181,7 @@ def run_interpret(
         synthesizer=synthesizer,
         sink=sink,
         pair=pair,
+        glossary=glossary,
         events=PipelineEvents(
             on_transcript=on_transcript,
             on_translation=on_translation,

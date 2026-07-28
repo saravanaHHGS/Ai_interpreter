@@ -445,6 +445,44 @@ class TestRetries:
         assert stats.utterances_out == 1
 
 
+class TestGlossary:
+    """Term recovery between recognition and translation."""
+
+    def test_translator_receives_the_rewritten_text(self) -> None:
+        from ai_interpreter.application.services.glossary import GlossaryRewriter
+
+        received: list[str] = []
+
+        class RecordingTranslator(FakeTranslator):
+            def translate(self, text: str, pair: LanguagePair) -> Translation:
+                received.append(text)
+                return super().translate(text, pair)
+
+        transcripts: list[str] = []
+        capture = FakeCapture()
+        pipeline = InterpretationPipeline(
+            capture=capture,  # type: ignore[arg-type]
+            recognizer=FakeRecognizer(text_prefix="வேர்ல்ட் status"),
+            translator=RecordingTranslator(),
+            synthesizer=None,
+            sink=None,
+            pair=PAIR,
+            glossary=GlossaryRewriter({"world": ["வேர்ல்ட்"]}),
+            events=PipelineEvents(on_transcript=lambda t: transcripts.append(t.text)),
+        )
+        pipeline.start()
+        try:
+            pipeline.submit_utterance(_utterance("u1"))
+            _wait_done(pipeline, 1)
+        finally:
+            pipeline.stop()
+
+        # Both the caption the user sees and the translator input carry the
+        # recovered term.
+        assert transcripts == ["world status u1"]
+        assert received == ["world status u1"]
+
+
 class TestBargeIn:
     """New speech silences the interpreter."""
 

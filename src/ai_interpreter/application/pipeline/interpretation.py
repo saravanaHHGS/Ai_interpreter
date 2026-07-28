@@ -50,10 +50,11 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TypeVar
 
 from ai_interpreter.application.services.capture_session import CaptureSession
+from ai_interpreter.application.services.glossary import GlossaryRewriter
 from ai_interpreter.application.services.utterance_segmenter import SegmenterState
 from ai_interpreter.domain.entities import Transcript, Translation, Utterance
 from ai_interpreter.domain.errors import InterpreterError
@@ -181,6 +182,9 @@ class InterpretationPipeline:
         sink: Audio output, or ``None`` for captions-only.
         pair: Direction being interpreted.
         events: Observer callbacks.
+        glossary: Term-recovery rewriter applied to transcripts before
+            translation, or ``None``. This is where code-switched English and
+            technical terms mangled by the Tamil-only recogniser are repaired.
         queue_maxsize: Utterances buffered before drop-oldest engages.
         max_retries: Per-stage retries before an utterance is dropped.
         retry_backoff_s: Pause before a retry.
@@ -195,6 +199,7 @@ class InterpretationPipeline:
         sink: AudioSink | None,
         pair: LanguagePair,
         events: PipelineEvents | None = None,
+        glossary: GlossaryRewriter | None = None,
         queue_maxsize: int = 2,
         max_retries: int = 1,
         retry_backoff_s: float = 0.25,
@@ -206,6 +211,7 @@ class InterpretationPipeline:
         self._sink = sink
         self._pair = pair
         self._events = events or PipelineEvents()
+        self._glossary = glossary
         self._queue_maxsize = queue_maxsize
         self._max_retries = max_retries
         self._retry_backoff_s = retry_backoff_s
@@ -372,6 +378,15 @@ class InterpretationPipeline:
         if transcript is None:
             return
         stt_done = time.perf_counter()
+
+        # Glossary repair happens before the transcript event, so the caption
+        # the user sees matches what the translator receives.
+        if self._glossary is not None and not transcript.is_empty:
+            rewritten = self._glossary.rewrite(transcript.text)
+            if rewritten != transcript.text:
+                logger.debug("Glossary rewrote transcript for %s", utterance.id)
+                transcript = replace(transcript, text=rewritten)
+
         if self._events.on_transcript is not None:
             self._events.on_transcript(transcript)
         if transcript.is_empty:

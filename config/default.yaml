@@ -175,6 +175,31 @@ translation:
     max_entries: 5000
     persist: false
 
+  # Glossary: intended term -> the transcript forms that should become it.
+  #
+  # The Tamil recogniser's vocabulary is Tamil-only, so English words spoken
+  # mid-sentence come out as phonetic Tamil ("world" -> வேர்ல்ட்), and
+  # product names or technical terms fare worse. Entries here are rewritten
+  # in the transcript BEFORE translation; IndicTrans2 passes Latin terms
+  # through untouched, so the recovered term reaches the English output
+  # verbatim (verified: "நாளைக்கு VALD session இருக்கு" -> "There will be a
+  # VALD session tomorrow").
+  #
+  # Workflow: run --interpret, read the [ta] line when a term comes out
+  # wrong, copy the EXACT wrong form here under the intended term. Put your
+  # personal glossary in %APPDATA%\HikeHealthGS\ai-interpreter\config.yaml
+  # so it survives updates. Matching is whole-word only and case-insensitive
+  # for Latin text.
+  #
+  # The starter entries below are the forms observed in a live session on
+  # this project; extend them as you meet new ones, e.g.
+  #   VALD: ["வால்ட்", "வால்டு"]
+  #   catapult: ["கேடபுல்ட்"]
+  # (copy the real forms from your own [ta] lines rather than guessing).
+  glossary:
+    world: ["வேர்ல்ட்", "வலட"]
+    research: ["ரெஸ்சர்ச்"]
+
 tts:
   # All voices run through sherpa-onnx's VITS engine - the runtime already
   # proven under Smart App Control for speech recognition.

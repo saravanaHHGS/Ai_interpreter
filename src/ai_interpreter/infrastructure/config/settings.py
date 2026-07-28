@@ -293,6 +293,10 @@ class TranslationSection(BaseModel):
     beam_size: int = Field(ge=1, le=10)
     max_input_chars: int = Field(ge=16, le=8192)
     cache: TranslationCacheSection
+    # Intended term -> transcript forms that should become it. Applied to
+    # transcripts before translation, recovering code-switched English and
+    # technical terms the Tamil-only recogniser renders phonetically.
+    glossary: dict[str, list[str]]
 
 
 class TtsSection(BaseModel):
