@@ -213,6 +213,13 @@ def _build_parser() -> argparse.ArgumentParser:
         help="synthesise text with the configured voice, save and play it",
     )
     parser.add_argument(
+        "--out",
+        type=str,
+        metavar="NAME",
+        default=None,
+        help='output device for --speak, e.g. "CABLE Input" for the virtual microphone',
+    )
+    parser.add_argument(
         "--source",
         type=str,
         metavar="CODE",
@@ -517,7 +524,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.translate is not None:
             return run_translate(container, args.translate, args.source, args.target)
         if args.speak is not None:
-            return run_speak(container, args.speak, args.language or args.target)
+            return run_speak(container, args.speak, args.language or args.target, args.out)
 
         print(f"AI Interpreter {__version__}")
         print(f"Profile: {container.selection.profile.value} ({container.selection.reason})")

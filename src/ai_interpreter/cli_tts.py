@@ -29,13 +29,22 @@ _EXIT_OK: Final[int] = 0
 _EXIT_ERROR: Final[int] = 1
 
 
-def run_speak(container: Container, text: str, language: str | None) -> int:
+def run_speak(
+    container: Container,
+    text: str,
+    language: str | None,
+    out_device: str | None = None,
+) -> int:
     """Synthesise text, report timings, save and play the audio.
 
     Args:
         container: Built application container.
         text: Text to speak.
         language: Language code, or ``None`` for the configured target.
+        out_device: Output device name fragment. ``"CABLE Input"`` routes the
+            speech into the virtual microphone - written **chunk by chunk as
+            synthesis produces them**, exactly as the live pipeline will, so
+            this is the Phase 7 end-to-end verification path.
 
     Returns:
         Process exit code.
@@ -56,8 +65,14 @@ def run_speak(container: Container, text: str, language: str | None) -> int:
 
     heading("Loading")
     row("Language", f"{chosen.english_name} ({chosen.code})")
+    sink = None
     try:
         synthesizer = container.create_synthesizer(chosen)
+        if out_device:
+            sink = container.create_audio_sink(device_name=out_device)
+            row("Output device", f"{sink.device.name}  [{sink.device.host_api}]")
+            if sink.device.is_virtual_cable:
+                row("", "-> select 'CABLE Output' as the microphone in Teams/Zoom/Meet")
     except InterpreterError as exc:
         print(f"\n{exc}\n", file=sys.stderr)
         return _EXIT_ERROR
@@ -67,6 +82,8 @@ def run_speak(container: Container, text: str, language: str | None) -> int:
         synthesizer.warmup()
         row("Voice", synthesizer.provider_id)
         row("Warmup", f"{(time.perf_counter() - started) * 1000.0:.0f} ms")
+        if sink is not None:
+            sink.open()
 
         heading("Synthesis")
         row("Text", text if len(text) <= 60 else text[:57] + "...")
@@ -77,6 +94,8 @@ def run_speak(container: Container, text: str, language: str | None) -> int:
         for chunk in synthesizer.synthesize_stream(text, chosen):
             if first_chunk_ms is None:
                 first_chunk_ms = (time.perf_counter() - started) * 1000.0
+            if sink is not None:
+                sink.write(chunk)
             chunks.append(chunk)
         total_ms = (time.perf_counter() - started) * 1000.0
 
@@ -103,12 +122,19 @@ def run_speak(container: Container, text: str, language: str | None) -> int:
             recorder.write(audio)
         row("Saved", wav_path.name)
 
-        _play(audio, rate.hz)
+        if sink is not None:
+            print("\n  Draining into the output device...")
+            sink.flush(timeout=duration_s + 5.0)
+            row("Underruns", str(sink.underruns))
+        else:
+            _play(audio, rate.hz)
     except InterpreterError as exc:
         print(f"\n{exc}\n", file=sys.stderr)
         return _EXIT_ERROR
     finally:
         synthesizer.close()
+        if sink is not None:
+            sink.close()
 
     return _EXIT_OK
 

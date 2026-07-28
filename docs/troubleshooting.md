@@ -220,6 +220,13 @@ its cloud reputation flipped and it was blocked mid-project. If a previously
 working tool suddenly reports `DLL load failed ... An Application Control
 policy has blocked this file`, this is what happened.
 
+Verdicts can also be **transient**: `av.filter.loudnorm` (inside
+faster-whisper's import chain) was blocked once and importable again twenty
+minutes later, with no change on this machine. **Retry once before treating a
+new block as permanent.** If Whisper's block ever becomes permanent, switch
+the English recogniser to the sherpa-onnx NeMo model with one config line:
+`stt.language_models.en: nemo-streaming-en`.
+
 Verified working under enforcement: `onnxruntime`, `sounddevice`, `soundfile`,
 `soxr`, `ctranslate2`, `sherpa_onnx`, `onnx`.
 

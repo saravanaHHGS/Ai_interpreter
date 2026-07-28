@@ -20,8 +20,8 @@ machine.
 | 3 | Audio capture, VAD, device selection | Complete |
 | 4 | Speech to text (incl. streaming-capable engines) | Complete |
 | 5 | Translation engine | Complete |
-| 6 | Text to speech | **Complete** |
-| 7 | Virtual microphone routing | Not started |
+| 6 | Text to speech | Complete |
+| 7 | Virtual microphone routing | **Complete** |
 | 8 | PySide6 desktop interface | Not started |
 | 9 | Streaming pipeline | Not started |
 | 10 | Performance optimisation | Not started |
@@ -79,7 +79,11 @@ Full instructions, including what to install and why: [docs/setup.md](docs/setup
 - **Speech synthesis** for both languages through sherpa-onnx VITS:
   English (Piper) first chunk in ~0.6 s; Tamil (MMS, the only CPU-runnable
   Tamil voice; CC-BY-NC licensed) in ~3.5 s, with sentence-streamed chunks.
-- **482 tests**, plus lint and strict type checking, all passing.
+- **The virtual microphone**: synthesised speech routed into VB-CABLE with a
+  jitter-buffered, always-open output stream and barge-in `clear()` —
+  verified by a full loopback (TTS in one end, transcribed word-perfect out
+  the other).
+- **501 tests**, plus lint and strict type checking, all passing.
 
 ---
 
@@ -130,6 +134,7 @@ results.
 .\run.ps1 --translate "Hello" --source en --target ta   # English -> Tamil
 .\run.ps1 --speak "Can you hear me?" --language en       # text to speech
 .\run.ps1 --speak "வணக்கம்" --language ta                # Tamil voice (slow)
+.\run.ps1 --speak "Hello Teams" --language en --out "CABLE Input"   # -> virtual mic
 .\run.ps1 --print-config             # effective configuration as YAML
 .\run.ps1 --print-config --profile cuda   # preview another hardware profile
 .\run.ps1 --version

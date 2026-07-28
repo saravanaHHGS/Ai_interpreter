@@ -56,6 +56,7 @@ from ai_interpreter.domain.value_objects import (
 from ai_interpreter.infrastructure.audio.capture.microphone import MicrophoneSource
 from ai_interpreter.infrastructure.audio.devices import SounddeviceDeviceEnumerator
 from ai_interpreter.infrastructure.audio.dsp import AudioPreprocessor
+from ai_interpreter.infrastructure.audio.playback.virtual_cable import VirtualCableSink
 from ai_interpreter.infrastructure.audio.vad.energy import EnergyVad
 from ai_interpreter.infrastructure.audio.vad.silero import SileroVad
 from ai_interpreter.infrastructure.config.loader import ConfigLoader, ConfigLoadReport
@@ -492,6 +493,45 @@ class Container:
         return CachedTranslator(
             inner=engine,
             cache=LruTranslationCache(max_entries=translation.cache.max_entries),
+        )
+
+    def resolve_output_device(self, name_override: str | None = None) -> DeviceInfo:
+        """Resolve which playback endpoint to write into.
+
+        Args:
+            name_override: Device name fragment from the command line, taking
+                precedence over ``audio.output.device``. For the virtual
+                microphone this is ``"CABLE Input"``.
+
+        Returns:
+            The endpoint to open.
+
+        Raises:
+            DeviceNotFoundError: If nothing matches, or the machine has no
+                playback device.
+        """
+        configured = name_override or self.settings.audio.output.device
+        return self.devices.resolve(configured, DeviceKind.OUTPUT)
+
+    def create_audio_sink(
+        self,
+        device: DeviceInfo | None = None,
+        device_name: str | None = None,
+    ) -> VirtualCableSink:
+        """Build the playback sink for synthesised speech.
+
+        Args:
+            device: Endpoint to open, or ``None`` to resolve one.
+            device_name: Name fragment used when ``device`` is ``None``.
+
+        Returns:
+            An unopened sink; call ``open()`` to start the stream.
+        """
+        output = self.settings.audio.output
+        return VirtualCableSink(
+            device=device or self.resolve_output_device(device_name),
+            output_rate=SampleRate(output.sample_rate),
+            jitter_buffer_ms=output.jitter_buffer_ms,
         )
 
     def create_synthesizer(self, language: LanguageCode | None = None) -> SherpaVitsSynthesizer:
