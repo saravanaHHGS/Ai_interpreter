@@ -69,6 +69,7 @@ from ai_interpreter.infrastructure.paths import ApplicationPaths
 from ai_interpreter.infrastructure.stt.faster_whisper import (
     FasterWhisperRecognizer,
     WhisperDecodeOptions,
+    build_initial_prompt,
 )
 from ai_interpreter.infrastructure.stt.onnx_metadata import ensure_onnx_metadata
 from ai_interpreter.infrastructure.stt.sherpa_nemo import (
@@ -370,6 +371,11 @@ class Container:
         # restricted to the languages it was trained on.
         supported = None if "*" in descriptor.languages else frozenset(descriptor.languages)
 
+        # Bias the decoder toward the user's own vocabulary: explicit
+        # hotwords plus the glossary's canonical terms, which are by
+        # definition words the user speaks.
+        prompt = build_initial_prompt([*stt.hotwords, *self.settings.translation.glossary.keys()])
+
         return FasterWhisperRecognizer(
             model_dir=model_dir,
             model_id=descriptor.id,
@@ -381,6 +387,7 @@ class Container:
                 beam_size=stt.beam_size,
                 word_timestamps=stt.word_timestamps,
                 min_confidence=stt.min_confidence,
+                initial_prompt=prompt,
             ),
             supported_languages=supported,
         )

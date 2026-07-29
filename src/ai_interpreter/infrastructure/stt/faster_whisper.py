@@ -108,6 +108,12 @@ class WhisperDecodeOptions:
         vad_filter: Whisper's own voice activity filter. Off, because Silero
             has already segmented the audio in Phase 3 - running a second
             detector would trim speech the first one deliberately kept.
+        initial_prompt: Text fed to the decoder as preceding context, which
+            biases it toward the vocabulary it contains. Passing the user's
+            technical terms here makes Whisper *recognise them directly*:
+            measured on synthesised speech, "game plan / Nordboard / Force
+            Frame" became "GamePlan / NordBord / ForceFrame" exactly. This is
+            decoder steering inside the model, not post-processing.
         min_confidence: Transcripts below this confidence are returned empty.
         repetition_penalty: Discourages the decoder from repeating tokens.
             Slightly above 1.0 suppresses runaway loops at negligible cost to
@@ -126,10 +132,32 @@ class WhisperDecodeOptions:
     log_prob_threshold: float = -1.0
     word_timestamps: bool = False
     vad_filter: bool = False
+    initial_prompt: str | None = None
     min_confidence: float = _DEFAULT_MIN_CONFIDENCE
     repetition_penalty: float = 1.1
     compression_ratio_threshold: float = 2.4
     min_word_diversity: float = 0.4
+
+
+def build_initial_prompt(terms: Sequence[str]) -> str | None:
+    """Build a decoder-biasing prompt from a list of technical terms.
+
+    Args:
+        terms: Product names, abbreviations and jargon the user speaks.
+            Order is preserved, duplicates and blanks dropped.
+
+    Returns:
+        A comma-joined prompt, or ``None`` when there is nothing to bias
+        toward - passing an empty prompt would still burn context tokens.
+    """
+    seen: dict[str, None] = {}
+    for term in terms:
+        cleaned = term.strip()
+        if cleaned:
+            seen.setdefault(cleaned, None)
+    if not seen:
+        return None
+    return ", ".join(seen) + "."
 
 
 # Below this word count, a low diversity ratio is normal rather than a loop:
@@ -506,6 +534,7 @@ class FasterWhisperRecognizer:
                 repetition_penalty=options.repetition_penalty,
                 word_timestamps=options.word_timestamps,
                 vad_filter=options.vad_filter,
+                initial_prompt=options.initial_prompt,
             )
             # The generator is lazy: decoding only happens on iteration, so
             # the timing around this call would be meaningless without it.

@@ -266,6 +266,12 @@ class SttSection(BaseModel):
     min_confidence: Probability
     # ISO 639-1 code -> model name. Empty means every language uses `model`.
     language_models: dict[str, str]
+    # Technical terms, product names and abbreviations you actually speak.
+    # Fed to Whisper-based recognisers as a decoder-biasing prompt, so the
+    # model recognises them DIRECTLY instead of drifting to dictionary words
+    # ("GamePlan" instead of "game plan"). The glossary's canonical terms are
+    # added automatically; list extras here.
+    hotwords: list[str]
     # When a "Tamil" transcript is phonotactically mostly English (the
     # Tamil-only recogniser transliterating an English sentence), re-recognise
     # the utterance with the English model and use its text directly.

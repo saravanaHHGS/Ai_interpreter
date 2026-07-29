@@ -148,6 +148,17 @@ stt:
     ta: indicconformer-ta
     en: base
 
+  # Technical terms, product names and abbreviations you actually speak.
+  # Whisper-based recognisers receive these as a decoder-biasing prompt and
+  # recognise them DIRECTLY - measured: "game plan / Nordboard / Force Frame"
+  # became "GamePlan / NordBord / ForceFrame" exactly, at no latency cost.
+  # The glossary's canonical terms are added automatically; list extras here.
+  hotwords:
+    - VALD
+    - GamePlan
+    - NordBord
+    - ForceFrame
+
   # Code-switch rescue. The Tamil recogniser's vocabulary is Tamil-only, so
   # an ENGLISH sentence spoken into it comes out as phonetic Tamil soup
   # ("இ பஸ் கன் கிரெட் மோர் பிரான்ச" for "e-bus can create more branches").

@@ -27,6 +27,7 @@ from ai_interpreter.infrastructure.stt.faster_whisper import (
     FasterWhisperRecognizer,
     WhisperDecodeOptions,
     _confidence_from_log_prob,
+    build_initial_prompt,
     frames_from_audio,
     is_repetitive,
 )
@@ -353,6 +354,35 @@ class TestRepetitionDetection:
         _recognizer(model).transcribe(_utterance())
 
         assert model.calls[0]["compression_ratio_threshold"] == pytest.approx(2.4)
+
+
+class TestHotwordPrompt:
+    """Decoder biasing toward the user's vocabulary."""
+
+    def test_prompt_reaches_the_decoder(self) -> None:
+        model = FakeWhisperModel([FakeSegment("Hi", 0.0, 1.0)])
+        recognizer = _recognizer(
+            model,
+            options=WhisperDecodeOptions(initial_prompt="VALD, GamePlan."),
+        )
+        recognizer.transcribe(_utterance())
+
+        assert model.calls[0]["initial_prompt"] == "VALD, GamePlan."
+
+    def test_no_prompt_by_default(self) -> None:
+        model = FakeWhisperModel([FakeSegment("Hi", 0.0, 1.0)])
+        _recognizer(model).transcribe(_utterance())
+
+        assert model.calls[0]["initial_prompt"] is None
+
+    def test_build_prompt_joins_and_dedupes(self) -> None:
+        prompt = build_initial_prompt(["VALD", "GamePlan", "VALD", "  NordBord "])
+        assert prompt == "VALD, GamePlan, NordBord."
+
+    def test_build_prompt_empty_input_is_none(self) -> None:
+        # An empty prompt would still burn context tokens.
+        assert build_initial_prompt([]) is None
+        assert build_initial_prompt(["  ", ""]) is None
 
 
 class TestConfidenceFloor:
