@@ -166,7 +166,10 @@ ignore_missing_imports = true
 minversion = "8.0"
 testpaths = ["tests"]
 pythonpath = ["src"]
-addopts = "-ra --strict-markers --strict-config"
+# requires_model tests run the real neural networks (slow, need the model
+# cache); excluded by default so the developer loop stays fast. Run them
+# with: pytest -m requires_model
+addopts = '-ra --strict-markers --strict-config -m "not requires_model"'
 markers = [
     "unit: fast, isolated tests with no external dependencies",
     "integration: tests that wire multiple components together",

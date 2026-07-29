@@ -58,6 +58,40 @@ class TestContainerBuild:
             assert container.settings.stt.device == "cuda"
             assert container.selection.was_automatic is False
 
+
+class TestComponentCache:
+    """Built components are shared across sessions (Phase 10)."""
+
+    ENERGY_VAD = {"AI_INTERPRETER__VAD__PROVIDER": "energy"}
+
+    def test_components_are_reused(self, project_root: Path) -> None:
+        # The energy detector needs no model download, so the cache path is
+        # exercised without touching the network.
+        with Container.build(
+            root=project_root, environ=self.ENERGY_VAD, console_stream=io.StringIO()
+        ) as container:
+            first = container.create_vad()
+            second = container.create_vad()
+
+            assert first is second
+            assert container.component_cache
+
+    def test_shutdown_closes_and_clears_the_cache(self, project_root: Path) -> None:
+        closed: list[str] = []
+
+        class Recording:
+            def close(self) -> None:
+                closed.append("closed")
+
+        container = Container.build(
+            root=project_root, environ=self.ENERGY_VAD, console_stream=io.StringIO()
+        )
+        container.component_cache[("test",)] = Recording()
+        container.shutdown()
+
+        assert closed == ["closed"]
+        assert not container.component_cache
+
     def test_resolved_profile_is_recorded_in_settings(self, project_root: Path) -> None:
         with Container.build(
             root=project_root,

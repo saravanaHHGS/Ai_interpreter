@@ -157,6 +157,139 @@ class TestBridge:
         assert received == ["from-worker"]
 
 
+class FakePipeline:
+    """Just enough pipeline for the controller lifecycle."""
+
+    def __init__(self) -> None:
+        self.started = False
+        self.stopped = False
+
+    def start(self) -> None:
+        self.started = True
+
+    def stop(self, timeout: float = 10.0) -> None:
+        self.stopped = True
+
+    def stats(self):  # type: ignore[no-untyped-def]
+        from ai_interpreter.application.pipeline.interpretation import PipelineStats
+
+        return PipelineStats(
+            utterances_in=3,
+            utterances_out=3,
+            dropped_backpressure=0,
+            dropped_empty=0,
+            failures=0,
+            barge_ins=0,
+            code_switch_reroutes=1,
+            word_fusions=2,
+            timings=(),
+        )
+
+
+class FakeBundle:
+    """Stands in for InterpretationBundle."""
+
+    def __init__(self, captions_only: bool = False) -> None:
+        self.pipeline = FakePipeline()
+        self.captions_only = captions_only
+        self.shut_down = False
+
+    def shutdown(self, timeout: float = 10.0) -> None:
+        self.shut_down = True
+        self.pipeline.stop()
+
+
+def _drain(qt_app: QApplication, condition, timeout: float = 5.0) -> None:  # type: ignore[no-untyped-def]
+    """Process events until a condition holds or the timeout passes."""
+    deadline = time.monotonic() + timeout
+    while not condition() and time.monotonic() < deadline:
+        qt_app.processEvents()
+        time.sleep(0.01)
+
+
+class TestController:
+    """Bundle lifecycle on background threads, reported through signals."""
+
+    def _controller(self, monkeypatch: pytest.MonkeyPatch, bundle: FakeBundle | None = None):  # type: ignore[no-untyped-def]
+        import ai_interpreter.presentation.ui.app as ui_app
+
+        made = bundle or FakeBundle()
+
+        def fake_builder(container, pair, events, **kwargs):  # type: ignore[no-untyped-def]
+            if kwargs.get("on_progress"):
+                kwargs["on_progress"]("STT", "fake model ready")
+            return made
+
+        monkeypatch.setattr(ui_app, "build_interpretation_bundle", fake_builder)
+        controller = ui_app.InterpreterController(object(), LanguagePair.of("ta", "en"))  # type: ignore[arg-type]
+        return controller, made
+
+    def test_start_builds_and_reports_ready(
+        self, qt_app: QApplication, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        controller, bundle = self._controller(monkeypatch)
+        progress: list[tuple[str, str]] = []
+        started: list[bool] = []
+        controller.progress.connect(lambda label, detail: progress.append((label, detail)))
+        controller.started.connect(started.append)
+
+        controller.start("Mic", "Speakers")
+        _drain(qt_app, lambda: bool(started))
+
+        assert started == [False]  # not captions-only
+        assert bundle.pipeline.started
+        assert ("STT", "fake model ready") in progress
+        assert controller.is_running
+
+    def test_stop_tears_down_and_summarises(
+        self, qt_app: QApplication, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        controller, bundle = self._controller(monkeypatch)
+        summaries: list[str] = []
+        controller.stopped.connect(summaries.append)
+        controller.start("Mic", "Speakers")
+        _drain(qt_app, lambda: controller.is_running)
+
+        controller.stop()
+        _drain(qt_app, lambda: bool(summaries))
+
+        assert bundle.shut_down
+        assert not controller.is_running
+        assert "2 fused" in summaries[0]
+        assert "1 rerouted" in summaries[0]
+
+    def test_build_failure_reports_and_recovers(
+        self, qt_app: QApplication, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import ai_interpreter.presentation.ui.app as ui_app
+        from ai_interpreter.domain.errors import ConfigurationError
+
+        def failing_builder(container, pair, events, **kwargs):  # type: ignore[no-untyped-def]
+            raise ConfigurationError("no such device")
+
+        monkeypatch.setattr(ui_app, "build_interpretation_bundle", failing_builder)
+        controller = ui_app.InterpreterController(object(), LanguagePair.of("ta", "en"))  # type: ignore[arg-type]
+        failures: list[str] = []
+        controller.failed.connect(failures.append)
+
+        controller.start("Mic", "Speakers")
+        _drain(qt_app, lambda: bool(failures))
+
+        assert failures == ["no such device"]
+        assert not controller.is_running
+
+    def test_shutdown_closes_a_running_bundle(
+        self, qt_app: QApplication, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        controller, bundle = self._controller(monkeypatch)
+        controller.start("Mic", "Speakers")
+        _drain(qt_app, lambda: controller.is_running)
+
+        controller.shutdown()
+
+        assert bundle.shut_down
+
+
 class TestMainWindow:
     """The view in isolation."""
 
