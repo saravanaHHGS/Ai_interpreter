@@ -227,13 +227,18 @@ translation:
   # so it survives updates. Matching is whole-word only and case-insensitive
   # for Latin text.
   #
-  # The starter entries below are the forms observed in a live session on
-  # this project; extend them as you meet new ones, e.g.
-  #   VALD: ["வால்ட்", "வால்டு"]
+  # The entries below are forms observed in live sessions on this project,
+  # with the intended term CONFIRMED by the speaker; extend them as you meet
+  # new ones, e.g.
   #   catapult: ["கேடபுல்ட்"]
   # (copy the real forms from your own [ta] lines rather than guessing).
+  #
+  # VALD carries both scripts: the Tamil recogniser renders it வேர்ல்ட் or
+  # வலட, and the English recogniser (in fused or rerouted text) mishears it
+  # as "World" - all of them mean VALD. Same story for pending/"Bending".
   glossary:
-    world: ["வேர்ல்ட்", "வலட"]
+    VALD: ["வேர்ல்ட்", "வலட", "வால்ட்", "World"]
+    pending: ["பெண்டிங்", "Bending"]
     research: ["ரெஸ்சர்ச்"]
 
 tts:
