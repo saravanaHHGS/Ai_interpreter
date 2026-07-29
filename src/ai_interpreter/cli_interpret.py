@@ -186,13 +186,15 @@ def run_interpret(
         and pair.source.code != "en"
     ):
         try:
-            english_fallback = container.create_recognizer(pair.target)
+            # Word timestamps regardless of the global setting: transcript
+            # fusion splices by time, and without per-word timings it would
+            # quietly decline on every mixed sentence.
+            english_fallback = container.create_recognizer(pair.target, word_timestamps=True)
             english_fallback.warmup()
-            row(
-                "Code-switch rescue",
-                f"{container.describe_model_for(pair.target)} - English-heavy "
-                "utterances are re-recognised in English",
-            )
+            fusion = "word fusion for mixed sentences, reroute for English ones"
+            if not container.settings.stt.word_fusion:
+                fusion = "English-heavy utterances are re-recognised in English"
+            row("Code-switch rescue", f"{container.describe_model_for(pair.target)} - {fusion}")
         except InterpreterError as exc:
             logger.warning("Code-switch fallback unavailable: %s", exc)
             english_fallback = None
@@ -207,6 +209,7 @@ def run_interpret(
         glossary=glossary,
         english_fallback=english_fallback,
         fallback_min_score=container.settings.stt.code_switch_min_score,
+        word_fusion=container.settings.stt.word_fusion,
         events=PipelineEvents(
             on_transcript=on_transcript,
             on_translation=on_translation,
@@ -298,6 +301,7 @@ def _summarise(
     row("Failures", str(stats.failures))
     row("Barge-ins", str(stats.barge_ins))
     row("Code-switch rescues", str(stats.code_switch_reroutes))
+    row("Word fusions", str(stats.word_fusions))
 
     if stats.timings:
         latencies = sorted(t.eou_to_first_audio_ms for t in stats.timings)

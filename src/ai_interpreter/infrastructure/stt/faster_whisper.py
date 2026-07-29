@@ -590,14 +590,35 @@ class FasterWhisperRecognizer:
 
             avg_log_prob = float(getattr(segment, "avg_logprob", 0.0))
             log_probs.append(avg_log_prob)
-            domain_segments.append(
+
+            # With word timestamps on, emit one segment per word - the shape
+            # transcript fusion needs to splice English words into a Tamil
+            # sentence by time alignment. Without them, one segment covers
+            # the whole stretch, as before.
+            words = getattr(segment, "words", None) or ()
+            word_segments = [
                 TranscriptSegment(
-                    text=text,
-                    start_ms=float(segment.start) * 1000.0,
-                    end_ms=float(segment.end) * 1000.0,
-                    confidence=Confidence(_confidence_from_log_prob(avg_log_prob)),
+                    text=str(word.word).strip(),
+                    start_ms=float(word.start) * 1000.0,
+                    end_ms=float(word.end) * 1000.0,
+                    confidence=Confidence(
+                        min(1.0, max(0.0, float(getattr(word, "probability", 0.0) or 0.0)))
+                    ),
                 )
-            )
+                for word in words
+                if str(word.word).strip()
+            ]
+            if word_segments:
+                domain_segments.extend(word_segments)
+            else:
+                domain_segments.append(
+                    TranscriptSegment(
+                        text=text,
+                        start_ms=float(segment.start) * 1000.0,
+                        end_ms=float(segment.end) * 1000.0,
+                        confidence=Confidence(_confidence_from_log_prob(avg_log_prob)),
+                    )
+                )
 
         full_text = " ".join(segment.text for segment in domain_segments).strip()
         mean_log_prob = sum(log_probs) / len(log_probs) if log_probs else float("-inf")

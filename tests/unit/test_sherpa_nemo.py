@@ -23,6 +23,7 @@ from ai_interpreter.infrastructure.stt.sherpa_nemo import (
     SherpaNemoCtcRecognizer,
     SherpaNemoStreamingRecognizer,
     _join_tokens,
+    _word_segments,
 )
 
 pytestmark = pytest.mark.unit
@@ -151,6 +152,61 @@ class TestJoinTokens:
 
     def test_empty_is_empty(self) -> None:
         assert _join_tokens([]) == ""
+
+
+class TestWordSegments:
+    """Per-word segments from CTC token timestamps.
+
+    These are what transcript fusion aligns against, so the boundaries
+    matter: a word covers from its first token to the next word's first
+    token, because CTC reports where tokens begin, not how long they last.
+    """
+
+    def test_groups_tokens_into_words_at_the_marker(self) -> None:
+        segments = _word_segments(["▁என்", "▁பெ", "யர்"], [0.1, 0.5, 0.9], 2000.0)
+
+        assert [segment.text for segment in segments] == ["என்", "பெயர்"]
+
+    def test_word_spans_run_to_the_next_word_or_the_end(self) -> None:
+        segments = _word_segments(["▁என்", "▁பெ", "யர்"], [0.1, 0.5, 0.9], 2000.0)
+
+        assert segments[0].start_ms == pytest.approx(100.0)
+        assert segments[0].end_ms == pytest.approx(500.0)
+        assert segments[1].start_ms == pytest.approx(500.0)
+        assert segments[1].end_ms == pytest.approx(2000.0)
+
+    def test_empty_tokens_yield_no_segments(self) -> None:
+        assert _word_segments([], [], 1000.0) == ()
+
+    def test_mismatched_lengths_yield_no_segments(self) -> None:
+        assert _word_segments(["▁a"], [], 1000.0) == ()
+
+    def test_space_marked_tokens_group_the_same_way(self) -> None:
+        # The real engine converts ▁ into a literal leading space in
+        # result.tokens (measured on IndicConformer-ta); matching only the
+        # raw marker found no boundaries at all on the live model.
+        segments = _word_segments(
+            [" மே", "ட்ச", "ிங்", " ம", "ட்டும்"],
+            [0.40, 0.56, 0.72, 0.88, 0.96],
+            2000.0,
+        )
+
+        assert [segment.text for segment in segments] == ["மேட்சிங்", "மட்டும்"]
+        assert segments[1].start_ms == pytest.approx(880.0)
+
+    def test_commit_index_honours_space_marked_boundaries(self) -> None:
+        tokens = [" a", "x", " b", "y", " c"]
+        stamps = [0.0, 0.4, 1.0, 1.4, 2.0]
+
+        assert SherpaNemoCtcRecognizer._commit_index(tokens, stamps, 1.5) == 2
+
+    def test_transcribe_emits_one_segment_per_word(self) -> None:
+        recognizer = _ctc(lambda samples: (["▁வண", "க்கம்", "▁சரி"], [0.1, 0.5, 1.2]))
+        transcript = recognizer.transcribe(_utterance(2.0))
+
+        assert [segment.text for segment in transcript.segments] == ["வணக்கம்", "சரி"]
+        assert transcript.segments[0].end_ms == pytest.approx(1200.0)
+        assert transcript.segments[1].end_ms == pytest.approx(2000.0)
 
 
 class TestOfflineTranscribe:

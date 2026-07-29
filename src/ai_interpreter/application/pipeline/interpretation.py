@@ -57,8 +57,10 @@ from ai_interpreter.application.services.capture_session import CaptureSession
 from ai_interpreter.application.services.code_switch import (
     english_phonetic_score,
     flag_english_tokens,
+    has_native_anchor,
 )
 from ai_interpreter.application.services.glossary import GlossaryRewriter
+from ai_interpreter.application.services.transcript_fusion import fuse_transcripts
 from ai_interpreter.application.services.utterance_segmenter import SegmenterState
 from ai_interpreter.domain.entities import Transcript, Translation, Utterance
 from ai_interpreter.domain.errors import InterpreterError
@@ -123,6 +125,8 @@ class PipelineStats:
         barge_ins: Times playing audio was cleared by new speech.
         code_switch_reroutes: Utterances rescued by the English fallback
             because their "Tamil" transcript was phonotactically English.
+        word_fusions: Mixed utterances whose transliterated English words
+            were replaced by the English recogniser's words, time-aligned.
         timings: Per-utterance latency records, in completion order.
     """
 
@@ -133,6 +137,7 @@ class PipelineStats:
     failures: int
     barge_ins: int
     code_switch_reroutes: int
+    word_fusions: int
     timings: tuple[UtteranceTiming, ...]
 
 
@@ -169,6 +174,7 @@ class _Counters:
     failures: int = 0
     barge_ins: int = 0
     code_switch_reroutes: int = 0
+    word_fusions: int = 0
     timings: list[UtteranceTiming] = field(default_factory=list)
 
 
@@ -193,14 +199,19 @@ class InterpretationPipeline:
         glossary: Term-recovery rewriter applied to transcripts before
             translation, or ``None``. This is where code-switched English and
             technical terms mangled by the Tamil-only recogniser are repaired.
-        english_fallback: Recogniser for the *target* language, used to
-            rescue utterances the source-language model rendered as phonetic
-            soup - an English sentence spoken into the Tamil-only model. Only
-            consulted when the transcript is phonotactically English-heavy;
-            its text then bypasses translation entirely.
+        english_fallback: Recogniser for the *target* language, consulted
+            when the source transcript carries phonotactically English words.
+            Two repairs come from it, chosen per utterance: a transcript
+            that is English *throughout* (no native anchor word) is replaced
+            wholesale and bypasses translation; a *mixed* transcript keeps
+            its Tamil and has only the flagged words replaced by the English
+            recogniser's words from the same time window (word fusion).
         fallback_min_score: Flagged-word fraction (with at least two flagged
-            words) that triggers the rescue; half the utterance flagged
-            always triggers.
+            words) that triggers the wholesale reroute; half the utterance
+            flagged always triggers.
+        word_fusion: Whether mixed transcripts are repaired word-by-word.
+            Requires ``english_fallback`` and word timestamps on both
+            recognisers; without them fusion quietly declines per utterance.
         queue_maxsize: Utterances buffered before drop-oldest engages.
         max_retries: Per-stage retries before an utterance is dropped.
         retry_backoff_s: Pause before a retry.
@@ -218,6 +229,7 @@ class InterpretationPipeline:
         glossary: GlossaryRewriter | None = None,
         english_fallback: SpeechRecognizer | None = None,
         fallback_min_score: float = 0.3,
+        word_fusion: bool = True,
         queue_maxsize: int = 2,
         max_retries: int = 1,
         retry_backoff_s: float = 0.25,
@@ -232,6 +244,7 @@ class InterpretationPipeline:
         self._glossary = glossary
         self._english_fallback = english_fallback
         self._fallback_min_score = fallback_min_score
+        self._word_fusion = word_fusion
         self._queue_maxsize = queue_maxsize
         self._max_retries = max_retries
         self._retry_backoff_s = retry_backoff_s
@@ -313,6 +326,7 @@ class InterpretationPipeline:
                 failures=self._counters.failures,
                 barge_ins=self._counters.barge_ins,
                 code_switch_reroutes=self._counters.code_switch_reroutes,
+                word_fusions=self._counters.word_fusions,
                 timings=tuple(self._counters.timings),
             )
 
@@ -400,50 +414,24 @@ class InterpretationPipeline:
             return
         stt_done = time.perf_counter()
 
-        # Glossary repair happens before the transcript event, so the caption
+        # Model-level repair first: when the transcript carries flagged
+        # English-in-Tamil-script words, consult the English recogniser.
+        transcript, direct_translation = self._repair_code_switch(utterance, transcript)
+
+        # Glossary repair is the LAST resort, after the models have had their
+        # say - and it happens before the transcript event, so the caption
         # the user sees matches what the translator receives.
         if self._glossary is not None and not transcript.is_empty:
             rewritten = self._glossary.rewrite(transcript.text)
             if rewritten != transcript.text:
                 logger.debug("Glossary rewrote transcript for %s", utterance.id)
-                transcript = replace(transcript, text=rewritten)
-
-        # Code-switch rescue: an English sentence spoken into the Tamil-only
-        # model comes out as phonetic soup. When the transcript is
-        # phonotactically English-heavy, re-recognise with the target-language
-        # model and use that text directly - no translation needed.
-        direct_translation: Translation | None = None
-        if (
-            self._english_fallback is not None
-            and not transcript.is_empty
-            and self._pair.target.code == "en"
-        ):
-            flags = flag_english_tokens(transcript.text)
-            score = english_phonetic_score(transcript.text)
-            if score >= 0.5 or (len(flags) >= 2 and score >= self._fallback_min_score):
-                logger.debug(
-                    "Code-switch rescue for %s (score %.2f, flags %d)",
-                    utterance.id,
-                    score,
-                    len(flags),
-                )
-                english = self._with_retries(
-                    "stt-fallback",
-                    lambda: self._english_fallback.transcribe(  # type: ignore[union-attr]
-                        replace(utterance, language=self._pair.target)
-                    ),
-                )
-                if english is not None and not english.is_empty:
-                    with self._lock:
-                        self._counters.code_switch_reroutes += 1
-                    direct_translation = Translation(
-                        utterance_id=utterance.id,
-                        source_text=transcript.text,
-                        translated_text=english.text,
-                        pair=self._pair,
-                        model_id=f"{english.model_id}+direct",
+                transcript = replace(transcript, text=rewritten, segments=())
+                if direct_translation is not None:
+                    # The direct path speaks the transcript verbatim; a
+                    # glossary fix must reach the voice too.
+                    direct_translation = replace(
+                        direct_translation, translated_text=transcript.text
                     )
-                    transcript = english
 
         if self._events.on_transcript is not None:
             self._events.on_transcript(transcript)
@@ -487,6 +475,102 @@ class InterpretationPipeline:
             self._counters.timings.append(timing)
         if self._events.on_timing is not None:
             self._events.on_timing(timing)
+
+    def _repair_code_switch(
+        self, utterance: Utterance, transcript: Transcript
+    ) -> tuple[Transcript, Translation | None]:
+        """Repair English words the source-language recogniser transliterated.
+
+        Two tiers, selected by what the transcript actually is:
+
+        **Wholesale reroute** - the transcript is English throughout (flagged
+        words, and no long unflagged native word anchoring it as Tamil). The
+        English recogniser's text replaces it entirely and translation is
+        skipped: the speaker said an English sentence.
+
+        **Word fusion** - the transcript is genuinely mixed (an anchor word
+        proves the Tamil is real). The Tamil stays; only the flagged words
+        are replaced by the English recogniser's words from the same time
+        window. The result still goes through translation, which passes the
+        spliced Latin words through untouched.
+
+        Either way the English decode happens at most once per utterance.
+
+        Args:
+            utterance: The utterance, re-decoded by the fallback when needed.
+            transcript: The source-language transcript.
+
+        Returns:
+            The (possibly repaired) transcript, and a ready-made translation
+            when the wholesale reroute made translation unnecessary.
+        """
+        fallback = self._english_fallback
+        if fallback is None or transcript.is_empty or self._pair.target.code != "en":
+            return transcript, None
+
+        flags = flag_english_tokens(transcript.text)
+        if not flags:
+            return transcript, None
+        score = english_phonetic_score(transcript.text)
+        heavily_english = score >= 0.5 or (len(flags) >= 2 and score >= self._fallback_min_score)
+        # A native anchor word marks the sentence as genuinely mixed, which
+        # makes fusion the right repair even at a high score - a wholesale
+        # reroute would throw the real Tamil away. Without fusion available,
+        # the score decides alone, as before.
+        try_fusion = self._word_fusion and (
+            has_native_anchor(transcript.text) or not heavily_english
+        )
+        if not try_fusion and not heavily_english:
+            return transcript, None
+
+        logger.debug(
+            "Code-switch repair for %s (score %.2f, flags %d, fusion=%s)",
+            utterance.id,
+            score,
+            len(flags),
+            try_fusion,
+        )
+        english = self._with_retries(
+            "stt-fallback",
+            lambda: fallback.transcribe(replace(utterance, language=self._pair.target)),
+        )
+        if english is None or english.is_empty:
+            return transcript, None
+
+        if try_fusion:
+            fused = fuse_transcripts(transcript, english)
+            if fused is not None:
+                with self._lock:
+                    self._counters.word_fusions += 1
+                logger.debug(
+                    "Word fusion for %s replaced %d word(s) with %d",
+                    utterance.id,
+                    len(fused.replaced),
+                    len(fused.inserted),
+                )
+                repaired = replace(
+                    transcript,
+                    text=fused.text,
+                    segments=(),
+                    model_id=f"{transcript.model_id}+{english.model_id}+fusion",
+                )
+                return repaired, None
+            # Fusion declined (no word timestamps, or no English words in
+            # any flagged window). An English-heavy sentence still deserves
+            # the wholesale repair rather than translating soup.
+
+        if not heavily_english:
+            return transcript, None
+        with self._lock:
+            self._counters.code_switch_reroutes += 1
+        direct = Translation(
+            utterance_id=utterance.id,
+            source_text=transcript.text,
+            translated_text=english.text,
+            pair=self._pair,
+            model_id=f"{english.model_id}+direct",
+        )
+        return english, direct
 
     def _speak(self, translation: Translation) -> tuple[float | None, float]:
         """Synthesise a translation into the sink, chunk by chunk.

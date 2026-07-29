@@ -604,6 +604,133 @@ class TestCodeSwitchRescue:
         assert pipeline.stats().code_switch_reroutes == 0
 
 
+def _word_transcript(
+    utterance_id: UtteranceId,
+    words: list[tuple[str, float, float]],
+    language: LanguageCode,
+    model_id: str,
+) -> Transcript:
+    """Build a word-level transcript for the fusion tests.
+
+    Args:
+        utterance_id: Owning utterance.
+        words: (text, start_ms, end_ms) per word.
+        language: Transcript language.
+        model_id: Recorded model identifier.
+
+    Returns:
+        The transcript.
+    """
+    from ai_interpreter.domain.entities import TranscriptSegment
+
+    return Transcript(
+        utterance_id=utterance_id,
+        text=" ".join(word for word, _, _ in words),
+        language=language,
+        confidence=Confidence(0.9),
+        is_final=True,
+        segments=tuple(
+            TranscriptSegment(text=word, start_ms=start, end_ms=end, confidence=Confidence(0.9))
+            for word, start, end in words
+        ),
+        model_id=model_id,
+    )
+
+
+class TestWordFusion:
+    """Mixed sentences repaired word-by-word, replaying live utterance 3."""
+
+    # "matching மட்டும் pending ல இருக்கு" as the two models actually saw it.
+    TAMIL_WORDS = [
+        ("மேட்சிங்", 400.0, 900.0),
+        ("மட்டும்", 900.0, 1300.0),
+        ("பெண்டிங்", 1300.0, 1700.0),
+        ("ல", 1700.0, 1800.0),
+        ("இருக்கு", 1800.0, 2200.0),
+    ]
+    ENGLISH_WORDS = [
+        ("Matching", 400.0, 950.0),
+        ("Mutum", 950.0, 1250.0),
+        ("Bending.", 1300.0, 1750.0),
+    ]
+    FUSED = "Matching மட்டும் Bending ல இருக்கு"
+
+    @classmethod
+    def _mixed_recognizer(cls) -> FakeRecognizer:
+        class MixedRecognizer(FakeRecognizer):
+            def transcribe(self, utterance: Utterance) -> Transcript:
+                self.calls += 1
+                return _word_transcript(utterance.id, cls.TAMIL_WORDS, TAMIL, "conformer-ta")
+
+        return MixedRecognizer()
+
+    @classmethod
+    def _english_recognizer(cls) -> FakeRecognizer:
+        class EnglishRecognizer(FakeRecognizer):
+            def transcribe(self, utterance: Utterance) -> Transcript:
+                self.calls += 1
+                assert utterance.language == ENGLISH
+                return _word_transcript(utterance.id, cls.ENGLISH_WORDS, ENGLISH, "whisper-base")
+
+        return EnglishRecognizer()
+
+    def _run(self, **overrides: Any) -> tuple[Any, FakeTranslator, list[Transcript]]:
+        translator = FakeTranslator()
+        transcripts: list[Transcript] = []
+        options: dict[str, Any] = {
+            "capture": FakeCapture(),
+            "recognizer": self._mixed_recognizer(),
+            "translator": translator,
+            "synthesizer": None,
+            "sink": None,
+            "pair": PAIR,
+            "english_fallback": self._english_recognizer(),
+            "events": PipelineEvents(on_transcript=transcripts.append),
+        }
+        options.update(overrides)
+        pipeline = InterpretationPipeline(**options)
+        pipeline.start()
+        try:
+            pipeline.submit_utterance(_utterance("u1"))
+            _wait_done(pipeline, 1)
+        finally:
+            pipeline.stop()
+        return pipeline, translator, transcripts
+
+    def test_mixed_sentence_is_fused_and_still_translated(self) -> None:
+        pipeline, translator, transcripts = self._run()
+
+        # The Tamil survived, the English words were spliced in, and the
+        # fused text - not the transliterated soup - reached the translator.
+        assert transcripts[0].text == self.FUSED
+        assert transcripts[0].model_id == "conformer-ta+whisper-base+fusion"
+        assert translator.calls == 1
+        assert pipeline.stats().word_fusions == 1
+        assert pipeline.stats().code_switch_reroutes == 0
+
+    def test_fusion_can_be_disabled(self) -> None:
+        # With fusion off, this sentence (score 0.50) takes the wholesale
+        # reroute exactly as before the feature existed.
+        pipeline, translator, transcripts = self._run(word_fusion=False)
+
+        assert transcripts[0].text == "Matching Mutum Bending."
+        assert translator.calls == 0
+        assert pipeline.stats().code_switch_reroutes == 1
+        assert pipeline.stats().word_fusions == 0
+
+    def test_fused_text_goes_through_the_glossary(self) -> None:
+        from ai_interpreter.application.services.glossary import GlossaryRewriter
+
+        # The models come first; the glossary is the last resort - here it
+        # repairs Whisper's "Bending" mishearing of "pending".
+        pipeline, _translator, transcripts = self._run(
+            glossary=GlossaryRewriter({"pending": ["Bending"]})
+        )
+
+        assert transcripts[0].text == "Matching மட்டும் pending ல இருக்கு"
+        assert pipeline.stats().word_fusions == 1
+
+
 class TestBargeIn:
     """New speech silences the interpreter."""
 

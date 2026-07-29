@@ -38,6 +38,16 @@ RATE = SampleRate(16000)
 
 
 @dataclass
+class FakeWord:
+    """Stand-in for a faster-whisper word timing."""
+
+    word: str
+    start: float
+    end: float
+    probability: float = 0.9
+
+
+@dataclass
 class FakeSegment:
     """Stand-in for a faster-whisper segment."""
 
@@ -47,6 +57,7 @@ class FakeSegment:
     avg_logprob: float = -0.2
     no_speech_prob: float = 0.01
     compression_ratio: float = 1.2
+    words: list[FakeWord] | None = None
 
 
 class FakeInfo:
@@ -354,6 +365,51 @@ class TestRepetitionDetection:
         _recognizer(model).transcribe(_utterance())
 
         assert model.calls[0]["compression_ratio_threshold"] == pytest.approx(2.4)
+
+
+class TestWordSegments:
+    """Per-word segments when word timestamps are enabled.
+
+    These give transcript fusion the time-aligned English words it splices
+    into a mixed Tamil sentence.
+    """
+
+    def test_words_become_individual_segments(self) -> None:
+        model = FakeWhisperModel(
+            [
+                FakeSegment(
+                    "World assessment.",
+                    0.0,
+                    2.0,
+                    words=[
+                        FakeWord(" World", 0.4, 0.9),
+                        FakeWord(" assessment.", 0.9, 1.8),
+                    ],
+                )
+            ]
+        )
+        recognizer = _recognizer(model, options=WhisperDecodeOptions(word_timestamps=True))
+        transcript = recognizer.transcribe(_utterance())
+
+        assert [segment.text for segment in transcript.segments] == ["World", "assessment."]
+        assert transcript.segments[0].start_ms == pytest.approx(400.0)
+        assert transcript.segments[1].end_ms == pytest.approx(1800.0)
+        assert transcript.text == "World assessment."
+
+    def test_word_confidence_comes_from_its_probability(self) -> None:
+        model = FakeWhisperModel(
+            [FakeSegment("Hi", 0.0, 1.0, words=[FakeWord(" Hi", 0.0, 0.5, probability=0.7)])]
+        )
+        recognizer = _recognizer(model, options=WhisperDecodeOptions(word_timestamps=True))
+        transcript = recognizer.transcribe(_utterance())
+
+        assert transcript.segments[0].confidence.value == pytest.approx(0.7)
+
+    def test_without_word_timings_one_segment_covers_the_stretch(self) -> None:
+        model = FakeWhisperModel([FakeSegment("Hello there", 0.0, 2.0)])
+        transcript = _recognizer(model).transcribe(_utterance())
+
+        assert [segment.text for segment in transcript.segments] == ["Hello there"]
 
 
 class TestHotwordPrompt:

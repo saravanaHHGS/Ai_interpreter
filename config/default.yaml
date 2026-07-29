@@ -175,6 +175,15 @@ stt:
   # of two flagged words), or when half the utterance is flagged.
   code_switch_min_score: 0.3
 
+  # Word fusion: the repair for MIXED sentences, where a wholesale reroute
+  # would throw away real Tamil. "மேட்சிங் மட்டும் பெண்டிங் ல இருக்கு"
+  # ("matching மட்டும் pending ல இருக்கு") keeps its Tamil; only the flagged
+  # words are replaced by the English recogniser's words from the same time
+  # window - both models timestamp against the same audio, so time is the
+  # join key. Costs one English decode (~2 s) on utterances that carry
+  # flagged words; pure Tamil pays nothing. Requires code_switch_fallback.
+  word_fusion: true
+
   # null = models/ inside the project directory.
   download_root: null
 

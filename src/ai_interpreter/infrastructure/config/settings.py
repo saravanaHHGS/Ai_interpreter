@@ -278,6 +278,11 @@ class SttSection(BaseModel):
     code_switch_fallback: bool
     # Minimum flagged fraction (with at least two flagged words) to reroute.
     code_switch_min_score: Probability
+    # Word-level repair for MIXED sentences: Tamil with English words inside
+    # ("மேட்சிங் மட்டும் பெண்டிங் ல இருக்கு"). The flagged words are replaced
+    # by the English recogniser's words from the same time window; the Tamil
+    # around them is kept. Requires code_switch_fallback.
+    word_fusion: bool
 
 
 class TranslationCacheSection(BaseModel):

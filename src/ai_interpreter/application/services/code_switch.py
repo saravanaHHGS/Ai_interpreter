@@ -34,7 +34,7 @@ from __future__ import annotations
 import re
 from typing import Final
 
-__all__ = ["english_phonetic_score", "flag_english_tokens"]
+__all__ = ["english_phonetic_score", "flag_english_tokens", "has_native_anchor"]
 
 # Grantha letters: imported for foreign sounds, weak evidence alone.
 _GRANTHA: Final[frozenset[str]] = frozenset("ஜஷஸஹ")
@@ -99,6 +99,42 @@ def flag_english_tokens(text: str) -> list[str]:
         Flagged tokens in order of appearance, duplicates preserved.
     """
     return [token for token in text.split() if _is_english_phonetic(token)]
+
+
+# Below this many codepoints, an unflagged Tamil token says nothing about the
+# sentence: transliterated English syllables (கன், மோர், டூ) are short, while
+# agglutinative native words (மட்டும், இருக்கு, முடிஞ்சிடுச்சு) run long.
+_MIN_ANCHOR_CHARS: Final[int] = 5
+
+
+def has_native_anchor(text: str, min_chars: int = _MIN_ANCHOR_CHARS) -> bool:
+    """Whether the text contains a confidently native Tamil word.
+
+    This is the discriminator between a *mixed* sentence and a *fully
+    English* one, which score alone cannot separate: ``வேர்ல்ட் அஸிஸ்மெண்ட்
+    முடிஞ்சிடுச்சு`` ("VALD assessment finished") scored 0.67 in a live
+    session while the fully-English ``வி நீட் டூ சால்வ் தத்`` ("we need to
+    solve that") scored 0.60. What separates them is முடிஞ்சிடுச்சு - a long,
+    unflagged, unmistakably native word. A sentence holding such an anchor
+    should keep its Tamil and have only the flagged words repaired; a
+    sentence without one is English wearing Tamil script and should be
+    re-recognised wholesale.
+
+    Args:
+        text: Tamil transcript.
+        min_chars: Minimum codepoint length for an unflagged token to count.
+
+    Returns:
+        ``True`` when at least one unflagged Tamil-script token is at least
+        ``min_chars`` long.
+    """
+    for token in text.split():
+        stripped = token.strip(".,!?;:\"'()[]{}")
+        if len(stripped) < min_chars or not _HAS_TAMIL.search(stripped):
+            continue
+        if not _is_english_phonetic(token):
+            return True
+    return False
 
 
 def english_phonetic_score(text: str) -> float:

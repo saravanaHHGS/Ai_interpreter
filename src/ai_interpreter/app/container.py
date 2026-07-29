@@ -311,7 +311,12 @@ class Container:
         """
         return LanguageCode(self.settings.app.language_pair.source)
 
-    def create_recognizer(self, language: LanguageCode | None = None) -> SpeechRecognizer:
+    def create_recognizer(
+        self,
+        language: LanguageCode | None = None,
+        *,
+        word_timestamps: bool | None = None,
+    ) -> SpeechRecognizer:
         """Build the speech recogniser for a language.
 
         Downloads the model on first use, and dispatches on the model's
@@ -323,6 +328,11 @@ class Container:
             language: Language to decode, overriding configuration. ``None``
                 resolves ``stt.language``, then the configured source
                 language.
+            word_timestamps: Override ``stt.word_timestamps`` for this
+                recogniser. The code-switch fallback needs per-word timings
+                for transcript fusion whatever the global setting says.
+                Sherpa CTC models timestamp every token regardless, so the
+                override only affects Whisper.
 
         Returns:
             The recogniser, not yet warmed up - call ``warmup()`` before
@@ -342,7 +352,7 @@ class Container:
         descriptor = self._resolve_stt_descriptor(self._model_name_for(chosen))
 
         if descriptor.runtime == "ctranslate2":
-            return self._create_whisper(descriptor, chosen)
+            return self._create_whisper(descriptor, chosen, word_timestamps=word_timestamps)
         if descriptor.runtime in ("sherpa-nemo-ctc", "sherpa-nemo-ctc-streaming"):
             return self._create_sherpa(descriptor, chosen)
 
@@ -353,13 +363,18 @@ class Container:
         raise ConfigurationError(msg)
 
     def _create_whisper(
-        self, descriptor: ModelDescriptor, language: LanguageCode
+        self,
+        descriptor: ModelDescriptor,
+        language: LanguageCode,
+        word_timestamps: bool | None = None,
     ) -> FasterWhisperRecognizer:
         """Build a CTranslate2 Whisper recogniser.
 
         Args:
             descriptor: Registry entry with runtime ``ctranslate2``.
             language: Language to decode.
+            word_timestamps: Override ``stt.word_timestamps`` when not
+                ``None``.
 
         Returns:
             The recogniser.
@@ -385,7 +400,9 @@ class Container:
             language=language,
             options=WhisperDecodeOptions(
                 beam_size=stt.beam_size,
-                word_timestamps=stt.word_timestamps,
+                word_timestamps=(
+                    stt.word_timestamps if word_timestamps is None else word_timestamps
+                ),
                 min_confidence=stt.min_confidence,
                 initial_prompt=prompt,
             ),

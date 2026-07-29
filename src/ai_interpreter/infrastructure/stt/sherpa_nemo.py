@@ -67,6 +67,23 @@ _REQUIRED_SAMPLE_RATE: Final[int] = 16000
 _WORD_MARKER: Final[str] = "▁"  # '▁'
 
 
+def _starts_word(token: str) -> bool:
+    """Whether a decoded token begins a new word.
+
+    sherpa-onnx converts the sentencepiece ``▁`` marker into a literal
+    leading space in ``result.tokens`` (measured on the real IndicConformer;
+    the raw marker survives in some other exports), so both spellings must
+    count - matching only ``▁`` silently finds no boundaries at all.
+
+    Args:
+        token: A decoded BPE token.
+
+    Returns:
+        ``True`` when the token starts a word.
+    """
+    return token.startswith((_WORD_MARKER, " "))
+
+
 def _join_tokens(tokens: Sequence[str]) -> str:
     """Join BPE tokens back into readable text.
 
@@ -77,6 +94,44 @@ def _join_tokens(tokens: Sequence[str]) -> str:
         The joined text with word markers converted to spaces.
     """
     return "".join(tokens).replace(_WORD_MARKER, " ").strip()
+
+
+def _word_segments(
+    tokens: Sequence[str],
+    stamps: Sequence[float],
+    total_ms: float,
+) -> tuple[TranscriptSegment, ...]:
+    """Group BPE tokens into per-word transcript segments.
+
+    Args:
+        tokens: Decoded sentencepiece tokens; a leading ``▁`` starts a word.
+        stamps: Start time of each token, in seconds.
+        total_ms: Audio length, used as the last word's end time.
+
+    Returns:
+        One segment per word, covering from the word's first token to the
+        next word's first token (or the end of the audio).
+    """
+    if not tokens or len(tokens) != len(stamps):
+        return ()
+
+    starts = [index for index, token in enumerate(tokens) if index == 0 or _starts_word(token)]
+    segments: list[TranscriptSegment] = []
+    for position, first in enumerate(starts):
+        after = starts[position + 1] if position + 1 < len(starts) else len(tokens)
+        word = _join_tokens(tokens[first:after])
+        if not word:
+            continue
+        end_ms = stamps[after] * 1000.0 if after < len(tokens) else total_ms
+        segments.append(
+            TranscriptSegment(
+                text=word,
+                start_ms=stamps[first] * 1000.0,
+                end_ms=max(end_ms, stamps[first] * 1000.0),
+                confidence=_availability_confidence(word),
+            )
+        )
+    return tuple(segments)
 
 
 def _availability_confidence(text: str) -> Confidence:
@@ -205,7 +260,15 @@ class SherpaNemoCtcRecognizer:
         self._utterances_decoded += 1
         self._total_decode_ms += elapsed_ms
 
-        return self._build_transcript(utterance.id, text, tokens, stamps, elapsed_ms, is_final=True)
+        return self._build_transcript(
+            utterance.id,
+            text,
+            tokens,
+            stamps,
+            elapsed_ms,
+            total_ms=utterance.duration_ms,
+            is_final=True,
+        )
 
     def transcribe_stream(
         self,
@@ -332,7 +395,7 @@ class SherpaNemoCtcRecognizer:
         for index, (token, stamp) in enumerate(zip(tokens, stamps, strict=True)):
             if stamp >= limit_s:
                 break
-            if token.startswith(_WORD_MARKER) and index > 0:
+            if _starts_word(token) and index > 0:
                 best = index
         return best
 
@@ -367,31 +430,31 @@ class SherpaNemoCtcRecognizer:
         stamps: Sequence[float],
         latency_ms: float,
         *,
+        total_ms: float,
         is_final: bool,
     ) -> Transcript:
-        """Build a transcript with a single covering segment.
+        """Build a transcript with one segment per word.
+
+        CTC token timestamps are what make word-level transcript fusion
+        possible: each transliterated-English word in a mixed sentence can be
+        located in time and matched against the English recogniser's view of
+        the same audio. Tokens are grouped into words at the sentencepiece
+        ``▁`` marker; a word's end is the next word's start, because CTC
+        reports where tokens *begin*, not how long they last.
 
         Args:
             utterance_id: Utterance the transcript belongs to.
             text: Recognised text.
-            tokens: Decoded tokens, for the segment time range.
-            stamps: Token start times.
+            tokens: Decoded tokens, for the per-word time ranges.
+            stamps: Token start times, in seconds.
             latency_ms: Decode duration.
+            total_ms: Utterance audio length, bounding the last word's end.
             is_final: Whether this is the final result.
 
         Returns:
             The transcript.
         """
-        segments: tuple[TranscriptSegment, ...] = ()
-        if text and stamps:
-            segments = (
-                TranscriptSegment(
-                    text=text,
-                    start_ms=stamps[0] * 1000.0,
-                    end_ms=stamps[-1] * 1000.0,
-                    confidence=_availability_confidence(text),
-                ),
-            )
+        segments = _word_segments(tokens, stamps, total_ms) if text else ()
         return Transcript(
             utterance_id=utterance_id,
             text=text,
