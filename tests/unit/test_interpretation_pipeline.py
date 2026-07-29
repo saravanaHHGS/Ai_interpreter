@@ -731,6 +731,179 @@ class TestWordFusion:
         assert pipeline.stats().word_fusions == 1
 
 
+class StreamingFakeRecognizer(FakeRecognizer):
+    """Satisfies the streaming port: partials per frame, then a final."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.stream_calls = 0
+
+    def transcribe_stream(self, frames, language=None):  # type: ignore[no-untyped-def]
+        self.stream_calls += 1
+        count = 0
+        for _ in frames:
+            count += 1
+            yield Transcript(
+                utterance_id=UtteranceId("stream"),
+                text=f"streamed-{count}",
+                language=TAMIL,
+                confidence=Confidence(1.0),
+                is_final=False,
+            )
+        yield Transcript(
+            utterance_id=UtteranceId("stream"),
+            text=f"streamed final after {count} frames",
+            language=TAMIL,
+            confidence=Confidence(1.0),
+            is_final=True,
+        )
+
+
+class TestStreamingLane:
+    """Frames decoded during speech; only the tail after end-of-utterance."""
+
+    @staticmethod
+    def _frame(index: int) -> Any:
+        from ai_interpreter.domain.entities import AudioFrame
+
+        return AudioFrame(
+            pcm=np.zeros(512, dtype=np.float32),
+            sample_rate=RATE,
+            timestamp_ms=index * 32.0,
+        )
+
+    def _run_streaming(
+        self, recognizer: FakeRecognizer, stream_min_seconds: float = 0.0
+    ) -> tuple[InterpretationPipeline, FakeTranslator, list[Transcript], list[Transcript]]:
+        translator = FakeTranslator()
+        transcripts: list[Transcript] = []
+        partials: list[Transcript] = []
+        pipeline = InterpretationPipeline(
+            capture=FakeCapture(),  # type: ignore[arg-type]
+            recognizer=recognizer,
+            translator=translator,
+            synthesizer=None,
+            sink=None,
+            pair=PAIR,
+            streaming_stt=True,
+            stream_min_seconds=stream_min_seconds,
+            events=PipelineEvents(
+                on_transcript=transcripts.append,
+                on_partial=partials.append,
+            ),
+        )
+        pipeline.start()
+        try:
+            pipeline._on_capture_state(SegmenterState.SPEECH)
+            for index in range(3):
+                pipeline._on_stream_frame(self._frame(index), 0.9)
+            pipeline._on_capture_state(SegmenterState.SILENCE)
+            pipeline.submit_utterance(_utterance("u1"))
+            _wait_done(pipeline, 1)
+        finally:
+            pipeline.stop()
+        return pipeline, translator, transcripts, partials
+
+    def test_streamed_transcript_is_used_instead_of_offline_decode(self) -> None:
+        recognizer = StreamingFakeRecognizer()
+        _, translator, transcripts, partials = self._run_streaming(recognizer)
+
+        assert recognizer.stream_calls == 1
+        assert recognizer.calls == 0  # offline transcribe never ran
+        assert transcripts[0].text == "streamed final after 3 frames"
+        assert transcripts[0].utterance_id == UtteranceId("u1")
+        assert translator.calls == 1
+        assert [partial.text for partial in partials] == [
+            "streamed-1",
+            "streamed-2",
+            "streamed-3",
+        ]
+
+    def test_short_utterances_stay_on_the_offline_path(self) -> None:
+        # Below the threshold, chunked commitment could never commit early,
+        # and the extra decode was measured to contend with the previous
+        # utterance's translation on 2 cores - so no stream must open.
+        recognizer = StreamingFakeRecognizer()
+        _, translator, transcripts, partials = self._run_streaming(
+            recognizer, stream_min_seconds=60.0
+        )
+
+        assert recognizer.stream_calls == 0
+        assert recognizer.calls == 1  # plain offline decode
+        assert transcripts[0].text.startswith("heard")
+        assert partials == []
+        assert translator.calls == 1
+
+    def test_preroll_frames_reach_the_stream(self) -> None:
+        # Frames arriving BEFORE speech onset must be seeded into the
+        # stream, or first syllables are lost relative to the offline path.
+        recognizer = StreamingFakeRecognizer()
+        translator = FakeTranslator()
+        transcripts: list[Transcript] = []
+        pipeline = InterpretationPipeline(
+            capture=FakeCapture(),  # type: ignore[arg-type]
+            recognizer=recognizer,
+            translator=translator,
+            synthesizer=None,
+            sink=None,
+            pair=PAIR,
+            streaming_stt=True,
+            stream_min_seconds=0.0,
+            events=PipelineEvents(on_transcript=transcripts.append),
+        )
+        pipeline.start()
+        try:
+            for index in range(2):  # silence before onset
+                pipeline._on_stream_frame(self._frame(index), 0.1)
+            pipeline._on_capture_state(SegmenterState.SPEECH)
+            pipeline._on_stream_frame(self._frame(2), 0.9)
+            pipeline.submit_utterance(_utterance("u1"))
+            _wait_done(pipeline, 1)
+        finally:
+            pipeline.stop()
+
+        assert transcripts[0].text == "streamed final after 3 frames"
+
+    def test_streaming_failure_falls_back_to_offline_decode(self) -> None:
+        class FailingStream(StreamingFakeRecognizer):
+            def transcribe_stream(self, frames, language=None):  # type: ignore[no-untyped-def]
+                self.stream_calls += 1
+                raise TranscriptionError("scripted streaming failure")
+                yield  # pragma: no cover
+
+        recognizer = FailingStream()
+        _, translator, transcripts, _ = self._run_streaming(recognizer)
+
+        assert recognizer.stream_calls == 1
+        assert recognizer.calls == 1  # offline decode rescued the utterance
+        assert transcripts[0].text.startswith("heard")
+        assert translator.calls == 1
+
+    def test_non_streaming_recognizer_disables_the_lane(self) -> None:
+        # streaming_stt=True with a recogniser lacking transcribe_stream
+        # must quietly use the offline path (the protocol check governs).
+        recognizer = FakeRecognizer()
+        translator = FakeTranslator()
+        pipeline = InterpretationPipeline(
+            capture=FakeCapture(),  # type: ignore[arg-type]
+            recognizer=recognizer,
+            translator=translator,
+            synthesizer=None,
+            sink=None,
+            pair=PAIR,
+            streaming_stt=True,
+        )
+        pipeline.start()
+        try:
+            pipeline.submit_utterance(_utterance("u1"))
+            _wait_done(pipeline, 1)
+        finally:
+            pipeline.stop()
+
+        assert recognizer.calls == 1
+        assert translator.calls == 1
+
+
 class TestBargeIn:
     """New speech silences the interpreter."""
 

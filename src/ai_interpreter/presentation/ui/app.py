@@ -193,6 +193,7 @@ def run_ui(container: Container) -> int:
 
     # Pipeline -> window, via the bridge.
     controller.bridge.transcript_received.connect(window.append_caption)
+    controller.bridge.partial_received.connect(window.show_partial)
     controller.bridge.translation_received.connect(window.append_translation)
     controller.bridge.timing_received.connect(window.show_timing)
     controller.bridge.error_occurred.connect(window.show_error)

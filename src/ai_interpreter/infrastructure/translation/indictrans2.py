@@ -118,6 +118,7 @@ class IndicTrans2Translator:
         self._engine: Any = None
         self._src_spm: Any = None
         self._tgt_spm: Any = None
+        self._warmed = False
         self._translations = 0
         self._total_ms = 0.0
 
@@ -172,6 +173,8 @@ class IndicTrans2Translator:
         Raises:
             ModelLoadError: If the model cannot be loaded.
         """
+        if self._warmed:
+            return
         self._ensure_engine()
         started = time.perf_counter()
         pair = (
@@ -188,6 +191,7 @@ class IndicTrans2Translator:
         # Warmup must not skew the running statistics.
         self._translations = 0
         self._total_ms = 0.0
+        self._warmed = True
         logger.info(
             "%s warmed up in %.0f ms (%d threads, beam %d)",
             self._model_id,
@@ -279,6 +283,7 @@ class IndicTrans2Translator:
         self._engine = None
         self._src_spm = None
         self._tgt_spm = None
+        self._warmed = False
 
     # -- internals ---------------------------------------------------------
     def _ensure_engine(self) -> None:

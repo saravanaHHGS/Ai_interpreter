@@ -32,11 +32,11 @@ synthesizer. No other module ever chooses an implementation.
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import TracebackType
-from typing import Self, TextIO
+from typing import Self, TextIO, TypeVar
 
 from ai_interpreter.application.services.cached_translator import CachedTranslator
 from ai_interpreter.application.services.profile_selector import (
@@ -88,6 +88,8 @@ logger = logging.getLogger(__name__)
 # Registry identifier of the neural voice activity detector.
 _SILERO_MODEL_ID = "silero-vad"
 
+_T = TypeVar("_T")
+
 
 @dataclass(frozen=True, slots=True)
 class Container:
@@ -116,6 +118,13 @@ class Container:
     devices: SounddeviceDeviceEnumerator
     models: ModelRegistry
     model_repository: HuggingFaceModelRepository
+
+    # Built model components, reused across sessions. Loading a model costs
+    # seconds; a UI Start after Stop must not pay it again. Keyed by what
+    # makes a component unique (model id, language, options); released in
+    # shutdown(). The dict itself is mutable inside this frozen dataclass -
+    # the *binding* is what frozen protects.
+    component_cache: dict[tuple[object, ...], object] = field(default_factory=dict)
 
     @classmethod
     def build(
@@ -272,6 +281,22 @@ class Container:
             gain_db=self.settings.audio.input.gain_db,
         )
 
+    def _cached(self, key: tuple[object, ...], factory: Callable[[], _T]) -> _T:
+        """Return the cached component for a key, building it once.
+
+        Args:
+            key: What makes the component unique.
+            factory: Builds the component on a cache miss.
+
+        Returns:
+            The shared component instance.
+        """
+        component = self.component_cache.get(key)
+        if component is None:
+            component = factory()
+            self.component_cache[key] = component
+        return component  # type: ignore[return-value]
+
     def create_vad(self) -> VoiceActivityDetector:
         """Build the voice activity detector named in configuration.
 
@@ -288,20 +313,25 @@ class Container:
         """
         provider = self.settings.vad.provider.strip().lower()
 
-        if provider == "energy":
-            detector: VoiceActivityDetector = EnergyVad()
-        elif provider == "silero":
-            descriptor = self.models.get(_SILERO_MODEL_ID)
-            model_path = self.model_repository.ensure_file(descriptor, descriptor.files[0])
-            detector = SileroVad(model_path=model_path, num_threads=1)
-        else:
-            msg = f"Unknown vad.provider {self.settings.vad.provider!r}. Valid: silero, energy"
-            raise ConfigurationError(msg)
+        def build() -> VoiceActivityDetector:
+            if provider == "energy":
+                detector: VoiceActivityDetector = EnergyVad()
+            elif provider == "silero":
+                descriptor = self.models.get(_SILERO_MODEL_ID)
+                model_path = self.model_repository.ensure_file(descriptor, descriptor.files[0])
+                detector = SileroVad(model_path=model_path, num_threads=1)
+            else:
+                msg = f"Unknown vad.provider {self.settings.vad.provider!r}. Valid: silero, energy"
+                raise ConfigurationError(msg)
 
-        warmup = getattr(detector, "warmup", None)
-        if callable(warmup):
-            warmup()
-        return detector
+            warmup = getattr(detector, "warmup", None)
+            if callable(warmup):
+                warmup()
+            return detector
+
+        # Reuse is safe: CaptureSession calls reset() before every run, so a
+        # recurrent detector never carries one session's state into the next.
+        return self._cached(("vad", provider), build)
 
     def source_language(self) -> LanguageCode:
         """Language the user speaks, from ``app.language_pair.source``.
@@ -350,31 +380,36 @@ class Container:
             chosen = LanguageCode(stt.language) if stt.language else self.source_language()
 
         descriptor = self._resolve_stt_descriptor(self._model_name_for(chosen))
+        effective_timestamps = stt.word_timestamps if word_timestamps is None else word_timestamps
 
-        if descriptor.runtime == "ctranslate2":
-            return self._create_whisper(descriptor, chosen, word_timestamps=word_timestamps)
-        if descriptor.runtime in ("sherpa-nemo-ctc", "sherpa-nemo-ctc-streaming"):
-            return self._create_sherpa(descriptor, chosen)
+        def build() -> SpeechRecognizer:
+            if descriptor.runtime == "ctranslate2":
+                return self._create_whisper(
+                    descriptor, chosen, word_timestamps=effective_timestamps
+                )
+            if descriptor.runtime in ("sherpa-nemo-ctc", "sherpa-nemo-ctc-streaming"):
+                return self._create_sherpa(descriptor, chosen)
 
-        msg = (
-            f"Model {descriptor.id!r} declares unknown runtime {descriptor.runtime!r}. "
-            "Known: ctranslate2, sherpa-nemo-ctc, sherpa-nemo-ctc-streaming"
-        )
-        raise ConfigurationError(msg)
+            msg = (
+                f"Model {descriptor.id!r} declares unknown runtime {descriptor.runtime!r}. "
+                "Known: ctranslate2, sherpa-nemo-ctc, sherpa-nemo-ctc-streaming"
+            )
+            raise ConfigurationError(msg)
+
+        return self._cached(("stt", descriptor.id, chosen.code, effective_timestamps), build)
 
     def _create_whisper(
         self,
         descriptor: ModelDescriptor,
         language: LanguageCode,
-        word_timestamps: bool | None = None,
+        word_timestamps: bool,
     ) -> FasterWhisperRecognizer:
         """Build a CTranslate2 Whisper recogniser.
 
         Args:
             descriptor: Registry entry with runtime ``ctranslate2``.
             language: Language to decode.
-            word_timestamps: Override ``stt.word_timestamps`` when not
-                ``None``.
+            word_timestamps: Whether to emit per-word segments.
 
         Returns:
             The recogniser.
@@ -400,9 +435,7 @@ class Container:
             language=language,
             options=WhisperDecodeOptions(
                 beam_size=stt.beam_size,
-                word_timestamps=(
-                    stt.word_timestamps if word_timestamps is None else word_timestamps
-                ),
+                word_timestamps=word_timestamps,
                 min_confidence=stt.min_confidence,
                 initial_prompt=prompt,
             ),
@@ -464,6 +497,7 @@ class Container:
             model_id=descriptor.id,
             language=language,
             cpu_threads=threads,
+            chunk_seconds=self.settings.stt.chunk_ms / 1000.0,
         )
 
     def create_translator(self, pair: LanguagePair | None = None) -> Translator:
@@ -501,23 +535,28 @@ class Container:
             )
             raise ConfigurationError(msg)
 
-        descriptor = self.models.get(model_name)
-        model_dir = self.model_repository.ensure(descriptor)
+        def build() -> Translator:
+            descriptor = self.models.get(model_name)
+            model_dir = self.model_repository.ensure(descriptor)
 
-        engine = IndicTrans2Translator(
-            model_dir=model_dir,
-            model_id=descriptor.id,
-            direction=direction,
-            cpu_threads=self.settings.stt.cpu_threads,
-            beam_size=translation.beam_size,
-            max_input_chars=translation.max_input_chars,
-        )
-        if not translation.cache.enabled:
-            return engine
-        return CachedTranslator(
-            inner=engine,
-            cache=LruTranslationCache(max_entries=translation.cache.max_entries),
-        )
+            engine = IndicTrans2Translator(
+                model_dir=model_dir,
+                model_id=descriptor.id,
+                direction=direction,
+                cpu_threads=self.settings.stt.cpu_threads,
+                beam_size=translation.beam_size,
+                max_input_chars=translation.max_input_chars,
+            )
+            if not translation.cache.enabled:
+                return engine
+            return CachedTranslator(
+                inner=engine,
+                cache=LruTranslationCache(max_entries=translation.cache.max_entries),
+            )
+
+        # Reusing the translator across sessions also carries its LRU cache
+        # forward - repeated sentences stay at 0 ms in the next session too.
+        return self._cached(("mt", direction), build)
 
     def resolve_output_device(self, name_override: str | None = None) -> DeviceInfo:
         """Resolve which playback endpoint to write into.
@@ -589,39 +628,42 @@ class Container:
             )
             raise ConfigurationError(msg)
 
-        descriptor = self.models.get(model_name)
-        if descriptor.is_non_commercial:
-            logger.warning(
-                "Voice %s is licensed %s - NON-COMMERCIAL use only. See "
-                "docs/deployment.md before distributing anything built on it.",
-                descriptor.id,
-                descriptor.license,
+        def build() -> SherpaVitsSynthesizer:
+            descriptor = self.models.get(model_name)
+            if descriptor.is_non_commercial:
+                logger.warning(
+                    "Voice %s is licensed %s - NON-COMMERCIAL use only. See "
+                    "docs/deployment.md before distributing anything built on it.",
+                    descriptor.id,
+                    descriptor.license,
+                )
+
+            model_dir = self.model_repository.ensure(descriptor)
+            if descriptor.files:
+                model_path = model_dir / Path(descriptor.files[0]).name
+                tokens_path = model_dir / Path(descriptor.files[1]).name
+            else:
+                # Snapshot layout (Piper): one .onnx at the root plus tokens.txt.
+                onnx_files = sorted(model_dir.glob("*.onnx"))
+                if not onnx_files:
+                    msg = f"No .onnx file found in the snapshot for {descriptor.id} at {model_dir}"
+                    raise ConfigurationError(msg)
+                model_path = onnx_files[0]
+                tokens_path = model_dir / "tokens.txt"
+
+            espeak_dir = model_dir / "espeak-ng-data"
+            return SherpaVitsSynthesizer(
+                model_path=model_path,
+                tokens_path=tokens_path,
+                model_id=descriptor.id,
+                language=chosen,
+                data_dir=espeak_dir if espeak_dir.is_dir() else None,
+                cpu_threads=self.settings.stt.cpu_threads,
+                speed=tts.speed,
+                sentence_split=tts.sentence_split,
             )
 
-        model_dir = self.model_repository.ensure(descriptor)
-        if descriptor.files:
-            model_path = model_dir / Path(descriptor.files[0]).name
-            tokens_path = model_dir / Path(descriptor.files[1]).name
-        else:
-            # Snapshot layout (Piper): one .onnx at the root plus tokens.txt.
-            onnx_files = sorted(model_dir.glob("*.onnx"))
-            if not onnx_files:
-                msg = f"No .onnx file found in the snapshot for {descriptor.id} at {model_dir}"
-                raise ConfigurationError(msg)
-            model_path = onnx_files[0]
-            tokens_path = model_dir / "tokens.txt"
-
-        espeak_dir = model_dir / "espeak-ng-data"
-        return SherpaVitsSynthesizer(
-            model_path=model_path,
-            tokens_path=tokens_path,
-            model_id=descriptor.id,
-            language=chosen,
-            data_dir=espeak_dir if espeak_dir.is_dir() else None,
-            cpu_threads=self.settings.stt.cpu_threads,
-            speed=tts.speed,
-            sentence_split=tts.sentence_split,
-        )
+        return self._cached(("tts", model_name, chosen.code), build)
 
     def _resolve_stt_descriptor(self, name: str) -> ModelDescriptor:
         """Look up a speech model, accepting bare Whisper size names.
@@ -732,6 +774,11 @@ class Container:
 
     def shutdown(self) -> None:
         """Release everything the container owns, in reverse build order."""
+        for component in reversed(list(self.component_cache.values())):
+            close = getattr(component, "close", None)
+            if callable(close):
+                close()
+        self.component_cache.clear()
         self.logging_service.shutdown()
 
     def __enter__(self) -> Self:

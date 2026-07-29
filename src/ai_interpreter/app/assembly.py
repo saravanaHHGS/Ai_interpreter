@@ -40,6 +40,7 @@ from ai_interpreter.domain.ports import (
 from ai_interpreter.domain.value_objects import LanguagePair, SampleRate
 from ai_interpreter.infrastructure.audio.capture.microphone import MicrophoneSource
 from ai_interpreter.infrastructure.audio.capture.wav_file import WavFileSource
+from ai_interpreter.infrastructure.stt.sherpa_nemo import SherpaNemoCtcRecognizer
 
 __all__ = ["InterpretationBundle", "ProgressCallback", "build_interpretation_bundle"]
 
@@ -77,18 +78,17 @@ class InterpretationBundle:
     captions_only: bool
 
     def shutdown(self, timeout: float = 10.0) -> None:
-        """Stop the pipeline and release every model. Safe to call twice.
+        """Stop the session. Safe to call twice.
+
+        Deliberately does NOT close the models: they are owned by the
+        container's component cache and stay warm, so the next session
+        starts in well under a second instead of paying ~10 s of loading.
+        ``Container.shutdown()`` releases them at process exit.
 
         Args:
             timeout: Seconds to wait for the pipeline worker.
         """
         self.pipeline.stop(timeout=timeout)
-        self.recognizer.close()
-        self.translator.close()
-        if self.english_fallback is not None:
-            self.english_fallback.close()
-        if self.synthesizer is not None:
-            self.synthesizer.close()
 
 
 def build_interpretation_bundle(
@@ -219,6 +219,14 @@ def build_interpretation_bundle(
             logger.warning("Code-switch fallback unavailable: %s", exc)
             english_fallback = None
 
+    # Streaming only pays on a linear-cost chunked recogniser: words commit
+    # while the speaker talks and only the tail decodes at end-of-utterance.
+    # On Whisper the same interface costs full encoder passes for zero
+    # latency gain, so the offline path stays.
+    streaming_stt = settings.stt.streaming and isinstance(recognizer, SherpaNemoCtcRecognizer)
+    if streaming_stt:
+        progress("Streaming", "chunked decode during speech; only the tail after you stop")
+
     pipeline = InterpretationPipeline(
         capture=capture,
         recognizer=recognizer,
@@ -230,6 +238,11 @@ def build_interpretation_bundle(
         english_fallback=english_fallback,
         fallback_min_score=settings.stt.code_switch_min_score,
         word_fusion=settings.stt.word_fusion,
+        streaming_stt=streaming_stt,
+        # Chunked commitment cannot commit anything before chunk+margin of
+        # audio exists, so shorter speech gains nothing from streaming and
+        # takes the offline path (0.8 s is the recogniser's fixed margin).
+        stream_min_seconds=settings.stt.chunk_ms / 1000.0 + 0.8,
         events=events,
         queue_maxsize=settings.pipeline.queue_maxsize,
         max_retries=settings.pipeline.max_retries,

@@ -86,6 +86,16 @@ class TestBridge:
 
         assert received == []
 
+    def test_partial_transcripts_emit_their_text(self, qt_app: QApplication) -> None:
+        bridge = PipelineBridge()
+        received: list[str] = []
+        bridge.partial_received.connect(received.append)
+
+        bridge.events().on_partial(_transcript("வணக்கம் என்", "ta"))  # type: ignore[misc]
+        qt_app.processEvents()
+
+        assert received == ["வணக்கம் என்"]
+
     def test_translation_carries_the_cache_flag(self, qt_app: QApplication) -> None:
         bridge = PipelineBridge()
         received: list[tuple[str, bool]] = []
@@ -208,6 +218,14 @@ class TestMainWindow:
         window.set_running(False)
         assert window.input_box.isEnabled()
         assert window.start_button.text() == "Start"
+
+    def test_partial_line_shows_and_final_caption_clears_it(self, qt_app: QApplication) -> None:
+        window = self._window()
+        window.show_partial("வணக்கம் என்")
+        assert "வணக்கம்" in window.partial_label.text()
+
+        window.append_caption("ta", "வணக்கம் என் பெயர்")
+        assert window.partial_label.text() == ""
 
     def test_timing_updates_the_latency_readout(self, qt_app: QApplication) -> None:
         window = self._window()

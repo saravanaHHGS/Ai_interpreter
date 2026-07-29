@@ -263,6 +263,18 @@ class TestOfflineTranscribe:
         assert recognizer.utterances_decoded == 2
         assert recognizer.mean_decode_ms >= 0.0
 
+    def test_second_warmup_is_free(self) -> None:
+        # Components are cached across sessions; a warm model must not pay
+        # a throwaway decode on every Start.
+        recognizer = _ctc(lambda samples: (["▁சரி"], [0.1]))
+        recognizer.warmup()
+        engine = recognizer._engine
+        assert isinstance(engine, FakeOfflineEngine)
+        decodes = len(engine.decode_durations)
+        recognizer.warmup()
+
+        assert len(engine.decode_durations) == decodes
+
 
 class TestChunkedStreaming:
     """The committed-chunk algorithm - the heart of low-latency Tamil.
@@ -363,6 +375,20 @@ class TestChunkedStreaming:
         list(recognizer.transcribe_stream(iter(_frames(6.0))))
 
         assert recognizer.utterances_decoded == 1
+
+    def test_final_segments_carry_absolute_word_times(self) -> None:
+        # Committed audio is trimmed from the buffer, but the segments must
+        # keep utterance-relative times - transcript fusion aligns words
+        # across recognisers by time, and a reset clock would break it.
+        recognizer = _ctc(self._script)
+        final = list(recognizer.transcribe_stream(iter(_frames(6.0))))[-1]
+
+        assert [segment.text for segment in final.segments] == final.text.split()
+        starts = [segment.start_ms for segment in final.segments]
+        # The script places word k at k seconds of absolute time.
+        for index, start in enumerate(starts):
+            assert start == pytest.approx(index * 1000.0, abs=50.0)
+        assert starts == sorted(starts)
 
 
 class TestCommitIndex:

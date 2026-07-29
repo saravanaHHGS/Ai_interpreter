@@ -106,12 +106,29 @@ stt:
   # gain that real-time interpretation cannot afford.
   beam_size: 1
 
-  # Emit interim transcripts during long utterances.
-  # This buys LIVE FEEDBACK, NOT LOWER LATENCY: every interim decode costs a
-  # full Whisper encoder pass, so enabling it adds CPU load without reducing
-  # the delay after you stop speaking. Off by default on CPU.
-  streaming: false
-  chunk_ms: 3000
+  # Decode WHILE the speaker talks instead of after they stop.
+  # What this buys depends on the model, and the assembly only streams the
+  # ones where it pays:
+  #   IndicConformer (Tamil)  cost is linear, so words commit during speech
+  #                           and only the uncommitted tail decodes at
+  #                           end-of-utterance. Long sentences no longer pay
+  #                           their full length after the pause, and interim
+  #                           text feeds the UI's live caption line.
+  #   Whisper (English)       encoder is a fixed 30 s window; every interim
+  #                           decode costs a full pass for zero latency gain,
+  #                           so Whisper always uses the offline path.
+  # The lane only engages once speech has lasted chunk_ms + 0.8 s; shorter
+  # sentences decode offline exactly as before, because they could never
+  # commit early and the extra decode was measured to CONTEND with the
+  # previous utterance's translation on 2 cores.
+  # Streaming failures fall back to the offline decode per utterance - this
+  # setting can never lose speech.
+  streaming: true
+  # Audio accumulated before an incremental decode (plus a fixed 0.8 s
+  # right-context margin). Smaller = commits start earlier on long sentences
+  # but more re-decoding of the same audio; utterances shorter than
+  # chunk + margin never commit early and behave exactly as before.
+  chunk_ms: 2000
   partial_interval_ms: 3000
 
   # null = decode app.language_pair.source. Auto-detection costs an extra

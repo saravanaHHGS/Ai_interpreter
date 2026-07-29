@@ -253,6 +253,7 @@ class FasterWhisperRecognizer:
         self._options = options or WhisperDecodeOptions()
         self._supported = supported_languages or _SUPPORTED_LANGUAGES
         self._model: Any = None
+        self._warmed = False
         self._utterances_decoded = 0
         self._total_decode_ms = 0.0
 
@@ -309,6 +310,10 @@ class FasterWhisperRecognizer:
         Raises:
             ModelLoadError: If the model cannot be loaded.
         """
+        # Components are cached across sessions (Phase 10); warming an
+        # already-warm model would spend a full decode for nothing.
+        if self._warmed and self._model is not None:
+            return
         self._ensure_model()
         started = time.perf_counter()
 
@@ -324,6 +329,7 @@ class FasterWhisperRecognizer:
             msg = f"Whisper warmup failed for {self._model_id}: {exc}"
             raise ModelLoadError(msg) from exc
 
+        self._warmed = True
         logger.info(
             "Whisper %s warmed up in %.0f ms (%s, %s, %d threads)",
             self._model_id,
@@ -451,6 +457,7 @@ class FasterWhisperRecognizer:
     def close(self) -> None:
         """Release the model. Safe to call more than once."""
         self._model = None
+        self._warmed = False
 
     # -- internals ---------------------------------------------------------
     @property

@@ -85,6 +85,13 @@ class MainWindow(QMainWindow):
             "(or your speakers to listen), then press Start."
         )
 
+        # -- live partial line ----------------------------------------------
+        # What the recogniser has committed so far, while you are still
+        # speaking. Replaced in place, then cleared by the final transcript.
+        self.partial_label = QLabel("")
+        self.partial_label.setStyleSheet("color: gray; font-style: italic;")
+        self.partial_label.setTextFormat(Qt.TextFormat.PlainText)
+
         # -- status bar -----------------------------------------------------
         self.state_label = QLabel("idle")
         self.latency_label = QLabel("")
@@ -96,6 +103,7 @@ class MainWindow(QMainWindow):
         root = QVBoxLayout()
         root.addLayout(top)
         root.addWidget(self.captions, stretch=1)
+        root.addWidget(self.partial_label)
         central = QWidget()
         central.setLayout(root)
         self.setCentralWidget(central)
@@ -119,13 +127,26 @@ class MainWindow(QMainWindow):
 
     # -- slots fed by the bridge (always on the UI thread) -------------------
     def append_caption(self, language: str, text: str) -> None:
-        """Show a transcript line.
+        """Show a transcript line, superseding any partial.
 
         Args:
             language: ISO code shown as the line's tag.
             text: Recognised text.
         """
+        self.partial_label.clear()
         self._append_line(f"[{language}] {text}")
+
+    def show_partial(self, text: str) -> None:
+        """Update the live partial line while the speaker talks.
+
+        Args:
+            text: Committed-so-far text from the streaming recogniser.
+        """
+        metrics = self.partial_label.fontMetrics()
+        elided = metrics.elidedText(
+            f"... {text}", Qt.TextElideMode.ElideLeft, max(120, self.partial_label.width())
+        )
+        self.partial_label.setText(elided)
 
     def append_translation(self, text: str, from_cache: bool) -> None:
         """Show a translation line.

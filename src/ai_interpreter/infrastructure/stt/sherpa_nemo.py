@@ -185,6 +185,7 @@ class SherpaNemoCtcRecognizer:
         self._margin_s = commit_margin_seconds
         self._max_buffer_s = max_buffer_seconds
         self._engine: Any = None
+        self._warmed = False
         self._utterances_decoded = 0
         self._total_decode_ms = 0.0
 
@@ -228,9 +229,12 @@ class SherpaNemoCtcRecognizer:
         Raises:
             ModelLoadError: If the model cannot be loaded.
         """
+        if self._warmed and self._engine is not None:
+            return
         self._ensure_engine()
         started = time.perf_counter()
         self._decode(np.zeros(_REQUIRED_SAMPLE_RATE // 2, dtype=np.float32))
+        self._warmed = True
         logger.info(
             "%s warmed up in %.0f ms (%d threads)",
             self._model_id,
@@ -305,8 +309,14 @@ class SherpaNemoCtcRecognizer:
         self._require_language(language)
 
         utterance_id = UtteranceId("stream")
-        committed: list[str] = []
+        committed: list[TranscriptSegment] = []
         buffer = np.empty(0, dtype=np.float32)
+        # Absolute start time of the current buffer within the utterance.
+        # Committed audio is discarded, but the *segments* built from it must
+        # keep utterance-relative times or transcript fusion (which aligns
+        # words across two recognisers by time) would compare apples to
+        # trimmed oranges.
+        offset_s = 0.0
         chunk_samples = int(self._chunk_s * _REQUIRED_SAMPLE_RATE)
         margin_samples = int(self._margin_s * _REQUIRED_SAMPLE_RATE)
         # Once the buffer passes the threshold, decoding on *every* incoming
@@ -315,6 +325,14 @@ class SherpaNemoCtcRecognizer:
         growth_samples = _REQUIRED_SAMPLE_RATE // 2
         last_decoded_size = 0
         started = time.perf_counter()
+
+        def absolute_segments(
+            piece_tokens: Sequence[str],
+            piece_stamps: Sequence[float],
+            end_s: float,
+        ) -> tuple[TranscriptSegment, ...]:
+            shifted = [stamp + offset_s for stamp in piece_stamps]
+            return _word_segments(list(piece_tokens), shifted, (offset_s + end_s) * 1000.0)
 
         for frame in frames:
             self._require_rate(frame.sample_rate)
@@ -329,32 +347,31 @@ class SherpaNemoCtcRecognizer:
             cut = self._commit_index(tokens, stamps, limit_s)
 
             if cut is not None:
-                piece = _join_tokens(tokens[:cut])
-                if piece:
-                    committed.append(piece)
+                committed.extend(absolute_segments(tokens[:cut], stamps[:cut], stamps[cut]))
                 consumed = int(stamps[cut] * _REQUIRED_SAMPLE_RATE)
                 buffer = buffer[consumed:]
+                offset_s += stamps[cut]
                 tail = _join_tokens(tokens[cut:])
             elif buffer.size > self._max_buffer_s * _REQUIRED_SAMPLE_RATE:
                 # No boundary found and the buffer is at its ceiling: commit
                 # everything rather than grow without bound.
-                if text:
-                    committed.append(text)
+                duration_s = buffer.size / _REQUIRED_SAMPLE_RATE
+                committed.extend(absolute_segments(tokens, stamps, duration_s))
                 buffer = np.empty(0, dtype=np.float32)
+                offset_s += duration_s
                 tail = ""
             else:
                 tail = text
             last_decoded_size = buffer.size
 
-            partial = " ".join((*committed, tail)).strip()
+            partial = " ".join((*(segment.text for segment in committed), tail)).strip()
             yield self._partial_transcript(utterance_id, partial, started)
 
         if buffer.size:
-            text, _, _ = self._decode(buffer)
-            if text:
-                committed.append(text)
+            _, tokens, stamps = self._decode(buffer)
+            committed.extend(absolute_segments(tokens, stamps, buffer.size / _REQUIRED_SAMPLE_RATE))
 
-        final_text = " ".join(committed).strip()
+        final_text = " ".join(segment.text for segment in committed).strip()
         elapsed_ms = (time.perf_counter() - started) * 1000.0
         self._utterances_decoded += 1
         self._total_decode_ms += elapsed_ms
@@ -364,6 +381,7 @@ class SherpaNemoCtcRecognizer:
             language=self._language,
             confidence=_availability_confidence(final_text),
             is_final=True,
+            segments=tuple(committed),
             model_id=self._model_id,
             latency_ms=elapsed_ms,
         )
@@ -371,6 +389,7 @@ class SherpaNemoCtcRecognizer:
     def close(self) -> None:
         """Release the model. Safe to call more than once."""
         self._engine = None
+        self._warmed = False
 
     # -- internals ---------------------------------------------------------
     @staticmethod
@@ -587,6 +606,7 @@ class SherpaNemoStreamingRecognizer:
         self._language = language
         self._cpu_threads = cpu_threads
         self._engine: Any = None
+        self._warmed = False
         self._utterances_decoded = 0
         self._total_decode_ms = 0.0
 
@@ -630,6 +650,8 @@ class SherpaNemoStreamingRecognizer:
         Raises:
             ModelLoadError: If the model cannot be loaded.
         """
+        if self._warmed and self._engine is not None:
+            return
         self._ensure_engine()
         started = time.perf_counter()
         stream = self._engine.create_stream()
@@ -639,6 +661,7 @@ class SherpaNemoStreamingRecognizer:
         stream.input_finished()
         while self._engine.is_ready(stream):
             self._engine.decode_stream(stream)
+        self._warmed = True
         logger.info(
             "%s warmed up in %.0f ms (%d threads)",
             self._model_id,
@@ -778,6 +801,7 @@ class SherpaNemoStreamingRecognizer:
     def close(self) -> None:
         """Release the model. Safe to call more than once."""
         self._engine = None
+        self._warmed = False
 
     # -- internals ---------------------------------------------------------
     def _ensure_engine(self) -> None:

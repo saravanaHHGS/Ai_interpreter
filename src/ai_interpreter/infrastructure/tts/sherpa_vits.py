@@ -108,6 +108,7 @@ class SherpaVitsSynthesizer:
         self._speed = speed
         self._sentence_split = sentence_split
         self._engine: Any = None
+        self._warmed = False
         self._chunks_generated = 0
         self._total_ms = 0.0
 
@@ -174,12 +175,15 @@ class SherpaVitsSynthesizer:
         Raises:
             ModelLoadError: If the model cannot be loaded.
         """
+        if self._warmed and self._engine is not None:
+            return
         self._ensure_engine()
         started = time.perf_counter()
         sample = "வணக்கம்" if self._language.code == "ta" else "Hello."
         self._generate(sample, self._speed)
         self._chunks_generated = 0
         self._total_ms = 0.0
+        self._warmed = True
         logger.info(
             "%s warmed up in %.0f ms (%d threads)",
             self._model_id,
@@ -289,6 +293,7 @@ class SherpaVitsSynthesizer:
     def close(self) -> None:
         """Release the model. Safe to call more than once."""
         self._engine = None
+        self._warmed = False
 
     # -- internals ---------------------------------------------------------
     def _effective_speed(self, speed: float) -> float:

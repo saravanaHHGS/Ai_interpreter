@@ -33,6 +33,7 @@ class PipelineBridge(QObject):
     """
 
     transcript_received = Signal(str, str)  # language code, text
+    partial_received = Signal(str)  # interim text, grows as words commit
     translation_received = Signal(str, bool)  # text, from_cache
     timing_received = Signal(float, float, float, float)  # eou->audio, stt, mt, tts (ms)
     error_occurred = Signal(str, str)  # stage, message
@@ -46,6 +47,7 @@ class PipelineBridge(QObject):
         """
         return PipelineEvents(
             on_transcript=self._on_transcript,
+            on_partial=self._on_partial,
             on_translation=self._on_translation,
             on_timing=self._on_timing,
             on_error=self._on_error,
@@ -56,6 +58,10 @@ class PipelineBridge(QObject):
     def _on_transcript(self, transcript: Transcript) -> None:
         if not transcript.is_empty:
             self.transcript_received.emit(transcript.language.code, transcript.text)
+
+    def _on_partial(self, transcript: Transcript) -> None:
+        if not transcript.is_empty:
+            self.partial_received.emit(transcript.text)
 
     def _on_translation(self, translation: Translation) -> None:
         if not translation.is_empty:

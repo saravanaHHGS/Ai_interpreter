@@ -60,14 +60,16 @@ from ai_interpreter.application.services.code_switch import (
     has_native_anchor,
 )
 from ai_interpreter.application.services.glossary import GlossaryRewriter
+from ai_interpreter.application.services.streaming_transcriber import UtteranceStreamer
 from ai_interpreter.application.services.transcript_fusion import fuse_transcripts
 from ai_interpreter.application.services.utterance_segmenter import SegmenterState
-from ai_interpreter.domain.entities import Transcript, Translation, Utterance
+from ai_interpreter.domain.entities import AudioFrame, Transcript, Translation, Utterance
 from ai_interpreter.domain.errors import InterpreterError
 from ai_interpreter.domain.ports import (
     AudioSink,
     SpeechRecognizer,
     SpeechSynthesizer,
+    StreamingSpeechRecognizer,
     StreamingSpeechSynthesizer,
     Translator,
 )
@@ -84,6 +86,16 @@ logger = logging.getLogger(__name__)
 
 # How long the worker waits for an utterance before re-checking the stop flag.
 _QUEUE_POLL_SECONDS = 0.2
+
+# Pre-roll frames kept for the streaming lane. The segmenter keeps up to
+# 300 ms of audio from before speech onset; at 32 ms per VAD frame, twelve
+# frames cover it with margin. The streamed decode must see the same leading
+# audio the offline decode would, or first syllables go missing.
+_STREAM_PREROLL_FRAMES = 12
+
+# Ceiling on waiting for a streamed final transcript: the largest possible
+# uncommitted tail (max_buffer_seconds, 12 s) at the measured RTF, doubled.
+_STREAM_RESULT_TIMEOUT_SECONDS = 15.0
 
 _T = TypeVar("_T")
 
@@ -150,6 +162,8 @@ class PipelineEvents:
 
     Args:
         on_transcript: Final transcript for an utterance.
+        on_partial: Interim transcript while the speaker is still talking
+            (streaming lane only). Text grows as words are committed.
         on_translation: Translation for an utterance.
         on_timing: Latency record when an utterance completes.
         on_error: A stage failed for an utterance (after retries).
@@ -157,6 +171,7 @@ class PipelineEvents:
     """
 
     on_transcript: Callable[[Transcript], None] | None = None
+    on_partial: Callable[[Transcript], None] | None = None
     on_translation: Callable[[Translation], None] | None = None
     on_timing: Callable[[UtteranceTiming], None] | None = None
     on_error: Callable[[str, Exception], None] | None = None
@@ -212,6 +227,18 @@ class InterpretationPipeline:
         word_fusion: Whether mixed transcripts are repaired word-by-word.
             Requires ``english_fallback`` and word timestamps on both
             recognisers; without them fusion quietly declines per utterance.
+        streaming_stt: Feed frames into the recogniser *while the speaker is
+            talking* instead of decoding after end-of-utterance. Only worth
+            enabling for linear-cost chunked recognisers (the IndicConformer);
+            the assembly decides. Any streaming failure falls back to the
+            offline decode, so this can never lose an utterance.
+        stream_min_seconds: Speech must last this long before the streaming
+            lane engages. An utterance shorter than the recogniser's
+            chunk-plus-margin can never commit early, so streaming it buys
+            nothing - and measured on the WAV regression it *cost* time,
+            because the streamed decode contends with the previous
+            utterance's translation on 2 cores. Short sentences therefore
+            take the offline path exactly as before.
         queue_maxsize: Utterances buffered before drop-oldest engages.
         max_retries: Per-stage retries before an utterance is dropped.
         retry_backoff_s: Pause before a retry.
@@ -230,6 +257,8 @@ class InterpretationPipeline:
         english_fallback: SpeechRecognizer | None = None,
         fallback_min_score: float = 0.3,
         word_fusion: bool = True,
+        streaming_stt: bool = False,
+        stream_min_seconds: float = 2.8,
         queue_maxsize: int = 2,
         max_retries: int = 1,
         retry_backoff_s: float = 0.25,
@@ -256,9 +285,22 @@ class InterpretationPipeline:
         self._stop = threading.Event()
         self._worker: threading.Thread | None = None
 
+        # Streaming lane state, touched only on the capture thread (frames,
+        # state changes and utterance submission all arrive from it).
+        self._streaming_stt = streaming_stt and isinstance(recognizer, StreamingSpeechRecognizer)
+        self._stream_min_ms = stream_min_seconds * 1000.0
+        self._streamer: UtteranceStreamer | None = None
+        self._stream_ring: deque[AudioFrame] = deque(maxlen=_STREAM_PREROLL_FRAMES)
+        self._speech_buffer: list[AudioFrame] = []
+        self._speech_ms = 0.0
+        self._in_speech = False
+        self._streams: dict[str, UtteranceStreamer] = {}
+
         # Wire ourselves into the capture session.
         capture._on_utterance = self.submit_utterance
         capture._on_state_change = self._on_capture_state
+        if self._streaming_stt:
+            capture._on_frame = self._on_stream_frame
 
     # -- lifecycle ---------------------------------------------------------
     @property
@@ -290,6 +332,11 @@ class InterpretationPipeline:
             timeout: Seconds to wait for the worker.
         """
         self._capture.stop()
+        # A stream still open mid-speech must be released or its thread
+        # waits forever for frames that will never come.
+        streamer, self._streamer = self._streamer, None
+        if streamer is not None:
+            streamer.finish()
         self._stop.set()
         self._queue_ready.set()
 
@@ -339,6 +386,20 @@ class InterpretationPipeline:
         Args:
             utterance: The finished utterance.
         """
+        # Hand the live stream over to this utterance: end-of-utterance means
+        # the streamer can decode its tail while the worker gets scheduled.
+        # Short utterances never opened one and decode offline.
+        streamer, self._streamer = self._streamer, None
+        self._in_speech = False
+        self._speech_buffer.clear()
+        self._speech_ms = 0.0
+        if streamer is not None:
+            streamer.finish()
+            self._streams[str(utterance.id)] = streamer
+            while len(self._streams) > self._queue_maxsize + 1:
+                # Utterances dropped by backpressure never collect theirs.
+                self._streams.pop(next(iter(self._streams)))
+
         with self._lock:
             self._counters.utterances_in += 1
             self._queue.append((utterance, time.perf_counter()))
@@ -364,8 +425,55 @@ class InterpretationPipeline:
             self._sink.clear()
             with self._lock:
                 self._counters.barge_ins += 1
+
+        # Streaming lane: speech onset starts buffering (seeded with the
+        # pre-roll ring so the decode sees the same leading audio the
+        # offline path would); the stream itself only opens once speech has
+        # lasted long enough for chunked commitment to pay.
+        if self._streaming_stt:
+            if state is SegmenterState.SPEECH and self._streamer is None:
+                self._speech_buffer.extend(self._stream_ring)
+                self._speech_ms = sum(frame.duration_ms for frame in self._speech_buffer)
+                self._stream_ring.clear()
+                self._in_speech = True
+            elif state is SegmenterState.SILENCE:
+                self._in_speech = False
+
         if self._events.on_state is not None:
             self._events.on_state(state)
+
+    def _on_stream_frame(self, frame: AudioFrame, probability: float) -> None:
+        """Route one capture frame into the streaming lane.
+
+        Args:
+            frame: Processed 16 kHz frame from capture.
+            probability: Speech probability (unused; the segmenter decides).
+        """
+        if self._streamer is not None:
+            self._streamer.push(frame)
+            return
+        if not self._in_speech:
+            self._stream_ring.append(frame)
+            return
+
+        self._speech_buffer.append(frame)
+        self._speech_ms += frame.duration_ms
+        if self._speech_ms < self._stream_min_ms:
+            return
+
+        # Speech has outlasted the threshold: open the stream and hand it
+        # the whole backlog. The decode starts mid-utterance with enough
+        # audio buffered for its first committed chunk.
+        streamer = UtteranceStreamer(
+            self._recognizer,  # type: ignore[arg-type]
+            self._pair.source,
+            on_partial=self._events.on_partial,
+        )
+        for buffered in self._speech_buffer:
+            streamer.push(buffered)
+        self._speech_buffer.clear()
+        self._speech_ms = 0.0
+        self._streamer = streamer
 
     # -- worker ------------------------------------------------------------
     def _run(self) -> None:
@@ -409,7 +517,9 @@ class InterpretationPipeline:
             submitted_at: ``perf_counter`` when it left the segmenter -
                 the end-of-utterance reference for latency accounting.
         """
-        transcript = self._with_retries("stt", lambda: self._recognizer.transcribe(utterance))
+        transcript = self._collect_streamed(utterance)
+        if transcript is None:
+            transcript = self._with_retries("stt", lambda: self._recognizer.transcribe(utterance))
         if transcript is None:
             return
         stt_done = time.perf_counter()
@@ -475,6 +585,25 @@ class InterpretationPipeline:
             self._counters.timings.append(timing)
         if self._events.on_timing is not None:
             self._events.on_timing(timing)
+
+    def _collect_streamed(self, utterance: Utterance) -> Transcript | None:
+        """Collect the streamed transcript for an utterance, if one exists.
+
+        Args:
+            utterance: The utterance being interpreted.
+
+        Returns:
+            The final streamed transcript stamped with the utterance's id,
+            or ``None`` when no stream ran or it failed - the caller then
+            decodes offline, so streaming can never lose an utterance.
+        """
+        streamer = self._streams.pop(str(utterance.id), None)
+        if streamer is None:
+            return None
+        transcript = streamer.result(timeout=_STREAM_RESULT_TIMEOUT_SECONDS)
+        if transcript is None or streamer.error is not None:
+            return None
+        return replace(transcript, utterance_id=utterance.id)
 
     def _repair_code_switch(
         self, utterance: Utterance, transcript: Transcript

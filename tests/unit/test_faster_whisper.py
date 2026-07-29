@@ -367,6 +367,29 @@ class TestRepetitionDetection:
         assert model.calls[0]["compression_ratio_threshold"] == pytest.approx(2.4)
 
 
+class TestWarmupIdempotence:
+    """Cached components must not pay a decode per session."""
+
+    def test_second_warmup_is_free(self) -> None:
+        model = FakeWhisperModel([FakeSegment("Hi", 0.0, 1.0)])
+        recognizer = _recognizer(model)
+        recognizer.warmup()
+        first = len(model.calls)
+        recognizer.warmup()
+
+        assert len(model.calls) == first
+
+    def test_close_resets_so_the_next_warmup_decodes_again(self) -> None:
+        model = FakeWhisperModel([FakeSegment("Hi", 0.0, 1.0)])
+        recognizer = _recognizer(model)
+        recognizer.warmup()
+        recognizer.close()
+        recognizer._model = model
+        recognizer.warmup()
+
+        assert len(model.calls) == 2
+
+
 class TestWordSegments:
     """Per-word segments when word timestamps are enabled.
 
