@@ -2,112 +2,92 @@
 
 Real-time speech-to-speech translation for Windows meeting applications.
 
-You speak Tamil. Microsoft Teams hears English. It works with Teams, Zoom and
-Google Meet because it outputs through a **virtual microphone** rather than
-integrating with any particular meeting platform.
+You speak Tamil. Microsoft Teams hears English. It works with Teams, Zoom
+and Google Meet because it outputs through a **virtual microphone** rather
+than integrating with any particular meeting platform - and it handles the
+way people actually talk, mixing English technical terms and product names
+into Tamil sentences.
 
-Everything runs locally. No cloud service, no API key, no audio leaves your
-machine.
+Everything runs locally on an ordinary 2-core CPU. No cloud service, no API
+key, no GPU, no audio leaves your machine.
 
 ---
 
-## Status
+## Status: feature-complete (v1.0)
 
-| Phase | Scope | State |
-|-------|-------|-------|
-| 1 | Architecture design | Complete |
-| 2 | Project foundation: config, logging, DI, tests | Complete |
-| 3 | Audio capture, VAD, device selection | Complete |
-| 4 | Speech to text (incl. streaming-capable engines) | Complete |
-| 5 | Translation engine | Complete |
-| 6 | Text to speech | Complete |
-| 7 | Virtual microphone routing | Complete |
-| 8 | PySide6 desktop interface | Next |
-| 9 | Streaming pipeline (built before 8 by agreement) | **Complete** |
-| 10 | Performance optimisation | Not started |
-| 11 | Test suite expansion | Not started |
-| 12 | Packaging and installer | Not started |
+All twelve construction phases are delivered. Highlights, each measured on
+the reference machine (an Intel i5-7200U, 2 cores):
 
-The application is runnable after every phase.
+- **Live interpretation** at a mean of ~1.7 s from end-of-sentence to the
+  first translated audio, with per-utterance latency reporting.
+- **Code-switch understanding**: "VALD assessment முடிஞ்சுச்சு" is repaired
+  by fusing two recognisers' views of the same audio word-by-word, with
+  hotword biasing, a phonotactic detector, and a user-editable glossary as
+  layered defences. See [docs/code-switching.md](docs/code-switching.md).
+- **A desktop interface** (`--ui`): device pickers, Start/Stop, live
+  captions with a streaming partial line, latency readout. Second Start is
+  instant (0.01 s - models stay warm).
+- **A streaming lane** for long speech: 20.7 s of continuous talk produced
+  its final transcript 0.64 s after the speaker stopped, against 13.4 s for
+  the offline decode.
+- **640 tests** (630 fast + 10 real-model regressions over ground-truthed
+  recorded speech), ruff and strict mypy clean.
 
 ---
 
 ## Quick start
 
 ```powershell
-git clone <repository-url> C:\ai_interpreter
+# 1. Install Python 3.12+ from python.org (tick "Add python.exe to PATH")
+# 2. Unzip the release (or git clone) to C:\ai_interpreter, then:
 cd C:\ai_interpreter
-.\scripts\bootstrap.ps1
+.\scripts\bootstrap.ps1 -Locked     # environment + dependency install + doctor
+# 3. Install VB-CABLE from https://vb-audio.com/Cable/ (see docs/setup.md)
+
+.\run.ps1 --ui                      # the desktop interface
 ```
 
-That creates the virtual environment, installs everything, and runs the
-environment check. Then:
+In the interpreter: Microphone = your headset, Output = `CABLE Input`,
+press **Start**. In Teams: Settings -> Devices -> Microphone =
+`CABLE Output`. The meeting now hears your sentences in English.
+Optional: `.\scripts\install-shortcut.ps1` adds Start Menu and Desktop
+shortcuts.
 
-```powershell
-.\run.ps1 --check           # verify the environment
-.\run.ps1 --print-config    # show the settings actually in use
-```
-
-Full instructions, including what to install and why: [docs/setup.md](docs/setup.md).
+First run downloads ~1.3 GB of models (exact revisions, verified); see
+[docs/deployment.md](docs/deployment.md).
 
 ---
 
-## What is in the box today
+## How it works
 
-- **Clean Architecture** in four layers with dependency injection throughout.
-- **Typed configuration** from layered YAML with schema validation; an
-  unrecognised key stops startup instead of being silently ignored.
-- **Hardware profiles** selected automatically. The same code runs small
-  quantised models on a two-core laptop and full-quality models on an RTX GPU.
-- **Non-blocking rotating logs** that never stall the audio thread.
-- **Privacy by construction**: conversation text is kept out of log files
-  unless you explicitly opt in, nothing is persisted by default, and no
-  telemetry exists.
-- **Microphone capture** with device selection, WASAPI preference, stateful
-  resampling to 16 kHz, high-pass filtering, and a drop-oldest callback buffer.
-- **Neural voice activity detection** (Silero via ONNX Runtime, 0.5 ms per
-  32 ms frame) with an adaptive energy detector as a model-free fallback.
-- **Utterance segmentation** with pre-roll, so the first syllable is never
-  clipped, plus test recordings you can listen to.
-- **Speech to text** routed per language: IndicConformer for Tamil (linear
-  decode cost — the property that makes CPU streaming possible) and Whisper
-  on CTranslate2 for English, plus a `--benchmark` command that measures
-  decode time on your own machine instead of trusting an estimate.
-- **Tamil ↔ English translation** with IndicTrans2-200M on CTranslate2:
-  0.19–1.3 s per sentence on two cores, with an LRU cache that answers
-  repeated phrases in ~0.03 ms.
-- **Speech synthesis** for both languages through sherpa-onnx VITS:
-  English (Piper) first chunk in ~0.6 s; Tamil (MMS, the only CPU-runnable
-  Tamil voice; CC-BY-NC licensed) in ~3.5 s, with sentence-streamed chunks.
-- **The virtual microphone**: synthesised speech routed into VB-CABLE with a
-  jitter-buffered, always-open output stream and barge-in `clear()` —
-  verified by a full loopback (TTS in one end, transcribed word-perfect out
-  the other).
-- **The live pipeline** (`--interpret`): mic → VAD → STT → MT → TTS → virtual
-  microphone, with drop-oldest backpressure, bounded retries, barge-in, and
-  per-utterance EOU→audio latency reporting. Proven end to end: a Tamil
-  recording in, its English translation read back off the far side of the
-  cable.
-- **518 tests**, plus lint and strict type checking, all passing.
+```
+mic -> VAD -> segmentation -> Tamil STT (IndicConformer) ---+
+                |                                           |  word-level fusion
+                +-> streaming partial captions              |  for mixed sentences
+                          English STT (Whisper + hotwords) -+
+                                        |
+                       glossary -> IndicTrans2 translation -> Piper voice
+                                        |
+                              CABLE Input (virtual microphone) -> Teams
+```
+
+Every stage is behind a typed port (Clean Architecture, four layers, a
+hand-written composition root), every model was chosen by benchmarking on
+the target CPU, and every design decision that came from a measurement is
+written down next to the code it shaped.
 
 ---
 
 ## Requirements
 
-| | Minimum | Recommended |
+| | Minimum (verified) | Notes |
 |---|---|---|
-| OS | Windows 11 64-bit | Windows 11 64-bit |
-| Python | 3.12 | 3.12 |
-| CPU | 2 cores | 6+ cores |
-| RAM | 8 GB | 16 GB |
-| GPU | none (CPU fallback) | NVIDIA RTX, 6+ GB VRAM |
-| Disk | 12 GB free | 20 GB free |
-
-Latency depends heavily on hardware. On an RTX GPU the design target is
-roughly 0.7-0.9 s from the end of your sentence to the first translated audio.
-On a two-core laptop, expect 1.5-2.5 s. Real measurements are produced by the
-benchmarks in Phases 4, 6 and 10 — the numbers above are design targets, not
-results.
+| OS | Windows 11 64-bit | Smart App Control supported - see docs/deployment.md |
+| Python | 3.12 | |
+| CPU | 2 cores | the reference machine; more cores help |
+| RAM | 8 GB | ~2.5 GB in use while interpreting |
+| GPU | none | architecture keeps a CUDA profile for the future |
+| Disk | 5 GB free | environment + models |
 
 ---
 
@@ -115,49 +95,51 @@ results.
 
 | Document | Contents |
 |---|---|
-| [docs/architecture.md](docs/architecture.md) | Layers, ports, diagrams, latency budget, design decisions |
-| [docs/setup.md](docs/setup.md) | Installing everything from zero, with each command explained |
-| [docs/testing.md](docs/testing.md) | How to run and write tests |
-| [docs/deployment.md](docs/deployment.md) | Packaging, licensing, distribution |
+| [docs/architecture.md](docs/architecture.md) | Layers, ports, constraints, latency budget |
+| [docs/setup.md](docs/setup.md) | Installing everything from zero |
+| [docs/code-switching.md](docs/code-switching.md) | The mixed-language design and its measurements |
+| [docs/testing.md](docs/testing.md) | Running and writing tests |
+| [docs/deployment.md](docs/deployment.md) | Packaging, install, licensing |
 | [docs/troubleshooting.md](docs/troubleshooting.md) | Symptoms, causes, fixes |
-| [docs/phases/](docs/phases/) | What each phase delivered and how to verify it |
+| [docs/phases/](docs/phases/) | What each phase delivered and how it was verified |
 
 ---
 
 ## Command reference
 
 ```powershell
-.\run.ps1 --check                    # environment doctor; non-zero exit on failure
+.\run.ps1 --ui                       # desktop interface (recommended)
+.\run.ps1 --interpret 60             # live interpretation in the console
+.\run.ps1 --interpret 300 --out "CABLE Input"   # live into Teams' microphone
+.\run.ps1 --wav recording.wav        # reproducible pipeline run over a file
+.\run.ps1 --check                    # environment doctor
 .\run.ps1 --list-devices             # every audio input and output device
-.\run.ps1 --record 10                # capture 10 s, detect speech, save WAV files
-.\run.ps1 --record 10 --device "CABLE Output"   # capture from a named device
-.\run.ps1 --listen 20                # live speech to text from the microphone
+.\run.ps1 --record 10                # capture, detect speech, save WAVs
+.\run.ps1 --listen 20                # live speech to text only
 .\run.ps1 --transcribe file.wav      # transcribe a file with timings
-.\run.ps1 --transcribe file.wav --language en   # force the decode language
-.\run.ps1 --benchmark                # measure decode time across thread counts
 .\run.ps1 --translate "நாளைக்கு என்ன திட்டம்?"          # Tamil -> English
-.\run.ps1 --translate "Hello" --source en --target ta   # English -> Tamil
-.\run.ps1 --speak "Can you hear me?" --language en       # text to speech
-.\run.ps1 --speak "வணக்கம்" --language ta                # Tamil voice (slow)
-.\run.ps1 --speak "Hello Teams" --language en --out "CABLE Input"   # -> virtual mic
-.\run.ps1 --interpret 60                     # LIVE: speak Tamil, hear English
-.\run.ps1 --interpret 300 --out "CABLE Input"   # LIVE into Teams' microphone
-.\run.ps1 --wav recording.wav --out "CABLE Input"  # reproducible pipeline run
+.\run.ps1 --speak "Hello Teams" --language en --out "CABLE Input"
+.\run.ps1 --benchmark                # measure decode time on your machine
 .\run.ps1 --print-config             # effective configuration as YAML
-.\run.ps1 --print-config --profile cuda   # preview another hardware profile
-.\run.ps1 --version
-.\run.ps1 --help
 
-.\scripts\bootstrap.ps1              # set up or repair the environment
-.\scripts\bootstrap.ps1 -Locked      # install exact pinned versions
+.\scripts\bootstrap.ps1 -Locked      # set up or repair the environment
 .\scripts\quality.ps1                # lint, types and tests
-.\scripts\quality.ps1 -Fix           # auto-fix formatting and safe lint issues
+.\scripts\package.ps1                # build the distributable archive
+.\scripts\install-shortcut.ps1       # Start Menu / Desktop shortcuts
 ```
+
+Tests: `pytest` (fast suite, ~10 s) and `pytest -m requires_model` (real
+neural networks against ground-truthed speech, ~1 min).
 
 ---
 
 ## Licence
 
-MIT for this project's own code. Model and dependency licences differ and are
-listed in [docs/deployment.md](docs/deployment.md); two of them are
-non-commercial and are deliberately never used as defaults.
+MIT for this project's code ([LICENSE](LICENSE)). Dependency and model
+licences are listed in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+One default is non-commercial: the Tamil *voice* (Facebook MMS,
+CC-BY-NC 4.0) - the only Tamil voice runnable on CPU-only Windows today.
+Commercial deployments must fall back to Tamil captions or substitute a
+licensed voice; everything else in the default configuration is
+commercially usable. VB-CABLE is donationware, installed by the user, and
+never redistributed.

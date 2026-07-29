@@ -1,159 +1,133 @@
 # Deployment
 
-Packaging is built in Phase 12. This document records the decisions that
-Phase 12 depends on — particularly licensing, which constrains what may be
-shipped and is far cheaper to get right now than to discover at the end.
+How AI Interpreter is packaged, installed and licensed. Revised in Phase 12
+to match what the project *learned* between Phases 1 and 11 - most
+importantly about Smart App Control.
 
 ---
 
-## 1. Planned artefacts
+## 1. Why the distribution is a source archive, not an installer EXE
 
-| Artefact | Tool | Purpose |
-|---|---|---|
-| Windows installer | Inno Setup | Start Menu entry, uninstaller, per-user install |
-| Portable build | PyInstaller | Runs from a folder or USB stick, no installation |
-| Update check | Custom, opt-in | Compares versions against a release feed |
+Phase 1 planned PyInstaller + Inno Setup. Phase 12 rejects both, on
+evidence gathered on the reference machine:
 
-Both builds are produced from the same PyInstaller output. The portable
-version sets `AI_INTERPRETER_HOME` and `AI_INTERPRETER_USER_HOME` so that
-configuration, logs and models live beside the executable and nothing is
-written to the user profile.
+**Smart App Control blocks unsigned binaries.** It blocked PyTorch's DLLs
+(permanently), mypy's compiled runtime (forcing a from-source install), and
+it decides per-file with no user override short of disabling the policy -
+a one-way door this project refuses to ask users to walk through. A
+PyInstaller bootloader without a code-signing certificate is exactly the
+kind of unsigned, low-reputation executable SAC exists to stop. Shipping
+one would produce an installer that fails precisely on the well-managed
+Windows 11 machines this project targets.
 
-Those two environment variables already exist and are already tested — the
-portable build is a configuration of the application, not a special mode in
-the code.
+A **source distribution** has no such problem: every binary that actually
+executes is signed by someone SAC trusts - `python.exe` from python.org,
+wheels from PyPI (including Qt, signed by the Qt Company - verified to load
+under enforced SAC in Phase 8). The application itself is pure Python.
 
----
+Revisit only if a code-signing certificate is acquired; the release
+checklist below already has the slot.
 
-## 2. Versioning
-
-Semantic versioning. The single source of truth is `__version__` in
-`src/ai_interpreter/__init__.py`; `pyproject.toml` reads it via
-`[tool.setuptools.dynamic]`, so the two cannot disagree.
-
-During construction the minor version tracks the phase: `0.2.0` is Phase 2.
-The first feature-complete release is `1.0.0`.
-
----
-
-## 3. Licensing
-
-### This project
-
-MIT.
-
-### Dependencies
-
-| Component | Licence | Commercial use | Notes |
-|---|---|---|---|
-| PySide6 | LGPLv3 | Yes | Must be dynamically linked — PyInstaller's default is fine |
-| numpy, pydantic, PyYAML | BSD / MIT | Yes | |
-| sounddevice / PortAudio | MIT | Yes | |
-| onnxruntime | MIT | Yes | |
-| faster-whisper, CTranslate2 | MIT | Yes | |
-| Whisper weights | MIT | Yes | |
-| Silero VAD | MIT | Yes | |
-| IndicTrans2 | MIT | Yes | Default translator |
-| Piper | MIT | Yes | Default synthesizer |
-| Kokoro-82M | Apache-2.0 | Yes | CUDA profile synthesizer |
-| Parakeet TDT | CC-BY-4.0 | Yes | Requires attribution |
-| FFmpeg | LGPL / GPL build-dependent | Care needed | Not bundled; installed separately |
-
-### Deliberately excluded from defaults
-
-| Component | Licence | Why it is not a default |
-|---|---|---|
-| **NLLB-200** | CC-BY-NC | **Non-commercial only** |
-| **Coqui XTTS-v2** | CPML | **Non-commercial only** |
-
-Both remain available as opt-in adapters. Selecting one shows a licence
-warning in the UI. They are never selected automatically and never appear in a
-profile file.
-
-### The one exception: the Tamil voice
-
-| Component | Licence | Status |
-|---|---|---|
-| **`mms-tam`** (Facebook MMS Tamil TTS) | **CC-BY-NC 4.0 — non-commercial only** | **Default for Tamil speech output**, because it is the *only* Tamil voice that runs under constraint C6 (PyTorch blocked). Every AI4Bharat alternative is torch-only. |
-
-This is a deliberate, documented deviation from the exclusion policy above.
-The restriction is recorded in the model registry's `license` field, a
-warning is logged every time the voice loads, and any **commercial**
-distribution must either remove Tamil speech output (falling back to the
-designed on-screen captions), obtain different rights, or substitute a
-commercially licensed Tamil voice when one becomes runnable. English speech
-output (Piper, MIT) is unaffected.
-
-### VB-CABLE — the one that catches people out
-
-VB-CABLE is **donationware and may not be redistributed.** The installer must
-not bundle it. Phase 12 will:
-
-1. Detect whether a virtual cable is present (the code for this already
-   exists and runs in `--check`).
-2. If absent, link to <https://vb-audio.com/Cable/> with instructions.
-3. Never download or install it silently.
-
-### Attribution
-
-The installer and the About page will carry a `THIRD-PARTY-NOTICES.md`
-listing every dependency and model with its licence, including the CC-BY-4.0
-attribution Parakeet requires.
-
----
-
-## 4. Model distribution
-
-Models are **not** bundled. The installer is a few tens of megabytes; models
-total 1.5-12 GB depending on profile.
-
-On first run the application downloads only what the selected profile needs:
-
-| Profile | Approximate download |
-|---|---|
-| `cpu_low` | ~1.5 GB |
-| `cpu_high` | ~3 GB |
-| `cuda` | ~6-12 GB |
-
-Every model is pinned to an exact repository revision and verified after
-download. Tracking a moving branch would let upstream silently change the
-weights a user is running — a supply-chain risk with no upside.
-
----
-
-## 5. Build process (Phase 12)
+## 2. Building a release
 
 ```powershell
-.\scripts\bootstrap.ps1 -Locked   # exact pinned versions, reproducible
-.\scripts\quality.ps1             # all gates must pass
-.\scripts\build.ps1               # PyInstaller + Inno Setup   (Phase 12)
+.\scripts\package.ps1        # runs the fast suite, then builds
+                             # dist\ai-interpreter-<version>.zip
 ```
 
-`-Locked` uses `requirements.lock.txt` rather than resolving ranges, so the
-shipped binary contains exactly the versions that were tested.
+The archive contains the source tree, configuration, docs, scripts and
+pinned requirements - no virtual environment, no models, no recordings, no
+`.env`, no git history. It is a few hundred kilobytes.
 
----
+## 3. Installing on a new machine
 
-## 6. Release checklist (Phase 12)
+1. Install **Python 3.12+** from <https://www.python.org/downloads/>,
+   ticking "Add python.exe to PATH".
+2. Unzip the archive, e.g. to `C:\ai_interpreter`.
+3. `.\scripts\bootstrap.ps1 -Locked` - creates the environment from the
+   exact pinned versions the release was tested with, then runs the
+   environment doctor (`--check`).
+4. Install **VB-CABLE** yourself from <https://vb-audio.com/Cable/>
+   (download, extract, right-click `VBCABLE_Setup_x64.exe` -> Run as
+   administrator, reboot). It is donationware and **must never be bundled
+   or downloaded by this project**; `--check` detects whether it is
+   present and prints these instructions when it is not.
+5. Optional: `.\scripts\install-shortcut.ps1` puts "AI Interpreter" in the
+   Start Menu and on the Desktop, launching straight into the UI.
 
-- [ ] All quality gates pass
-- [ ] Version bumped in `src/ai_interpreter/__init__.py`
-- [ ] `requirements.lock.txt` regenerated
-- [ ] `THIRD-PARTY-NOTICES.md` regenerated
-- [ ] Release notes written
-- [ ] Installer tested on a clean Windows 11 machine with no Python installed
-- [ ] Portable build tested from a folder with no write access to the profile
-- [ ] Uninstaller leaves no orphaned files or registry keys
-- [ ] Git tag created
+First run downloads the models the configured direction needs, pinned to
+exact repository revisions:
 
----
-
-## 7. Security considerations for distribution
-
-| Risk | Mitigation |
+| Component | Size |
 |---|---|
-| Unsigned binary triggers SmartScreen | Code-signing certificate, or documented "More info → Run anyway" |
-| Tampered model weights | Exact revision pinning plus hash verification |
-| Credentials in a shipped build | `.env` is git-ignored and excluded from the PyInstaller spec |
-| Log files containing meeting content | Transcripts are filtered out of logs by default |
-| Unexpected network access | No runtime network calls except explicit model downloads |
+| Silero VAD | 2 MB |
+| IndicConformer Tamil STT | ~130 MB |
+| Whisper base (English STT + code-switch rescue) | ~140 MB |
+| IndicTrans2 Tamil->English | ~820 MB |
+| Piper English voice | ~78 MB |
+| MMS Tamil voice | ~109 MB |
+| IndicTrans2 English->Tamil (only if the reverse direction is used) | ~820 MB |
+
+Roughly **1.3 GB** for the primary direction. Models live in `models/`
+inside the project directory (`stt.download_root` moves them).
+
+## 4. Meeting-application setup
+
+In the interpreter (`.\run.ps1 --ui`): Microphone = your headset, Output =
+`CABLE Input (VB-Audio Virtual Cable)`, Start. In Teams/Zoom/Meet: select
+`CABLE Output (VB-Audio Virtual Cable)` as the microphone. The meeting
+hears the translation; verify with Teams' "Make a test call".
+
+## 5. Versioning
+
+Semantic versioning; the single source of truth is `__version__` in
+`src/ai_interpreter/__init__.py` (pyproject reads it dynamically). During
+construction the minor version tracked the phase; **1.0.0 marks the
+completion of the twelve-phase plan**.
+
+## 6. Licensing
+
+The application is MIT. Every dependency and model, with its licence, is
+listed in `THIRD-PARTY-NOTICES.md`. What actually constrains deployment:
+
+**The Tamil voice is non-commercial.** `mms-tam` (Facebook MMS,
+CC-BY-NC 4.0) is the default Tamil voice because it is the *only* one
+runnable under this project's constraints - every alternative is
+PyTorch-only (blocked, C6). The restriction is recorded in the model
+registry, and a warning is logged on every load. A **commercial**
+deployment must remove Tamil speech output (the application falls back to
+the designed on-screen captions), or substitute a commercially licensed
+voice when one becomes runnable. English output (Piper, MIT) is unaffected.
+
+**VB-CABLE is donationware and may not be redistributed.** Linked, never
+bundled, never silently downloaded.
+
+**PySide6/Qt is LGPL-3.0** - used unmodified and dynamically linked, which
+a source distribution satisfies by construction.
+
+## 7. Privacy posture
+
+Everything runs locally; the only network access is the explicit,
+revision-pinned model download. Meeting audio never leaves the machine.
+Transcript text is excluded from log files by default
+(`privacy.log_transcripts`). Recordings made by `--record` stay in
+`recordings/`, which is git-ignored and excluded from packaging.
+
+## 8. Uninstalling
+
+Delete the project directory (environment, models, logs, recordings all
+live inside it), `.\scripts\install-shortcut.ps1 -Remove` for the
+shortcuts, and remove `%APPDATA%\HikeHealthGS\ai-interpreter` if personal
+configuration overrides were saved. Nothing is written to the registry.
+
+## 9. Release checklist
+
+- [ ] Fast suite and `pytest -m requires_model` both pass
+- [ ] ruff, ruff format, mypy clean (`.\scripts\quality.ps1`)
+- [ ] Version bumped in `src/ai_interpreter/__init__.py`
+- [ ] `requirements.lock.txt` regenerated after any dependency change
+- [ ] `THIRD-PARTY-NOTICES.md` still matches `pyproject.toml` and `config/models.yaml`
+- [ ] `.\scripts\package.ps1` builds; archive spot-checked for excluded content (no `.env`, no models, no recordings)
+- [ ] Fresh-machine install rehearsed: unzip -> bootstrap -Locked -> `--check` -> `--ui`
+- [ ] Git tag created
+- [ ] (When a code-signing certificate exists) revisit the frozen-EXE decision in §1
