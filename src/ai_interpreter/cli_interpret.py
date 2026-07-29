@@ -19,6 +19,7 @@ import time
 from pathlib import Path
 from typing import Final
 
+from ai_interpreter.app.assembly import build_interpretation_bundle
 from ai_interpreter.app.container import Container
 from ai_interpreter.application.pipeline.interpretation import (
     InterpretationPipeline,
@@ -27,12 +28,9 @@ from ai_interpreter.application.pipeline.interpretation import (
 )
 from ai_interpreter.application.services.capture_session import CaptureSession
 from ai_interpreter.application.services.code_switch import flag_english_tokens
-from ai_interpreter.application.services.glossary import GlossaryRewriter
 from ai_interpreter.domain.entities import Transcript, Translation
-from ai_interpreter.domain.errors import ConfigurationError, InterpreterError
-from ai_interpreter.domain.ports import AudioSink, SpeechSynthesizer
-from ai_interpreter.domain.value_objects import LanguagePair, SampleRate
-from ai_interpreter.infrastructure.audio.capture.wav_file import WavFileSource
+from ai_interpreter.domain.errors import InterpreterError
+from ai_interpreter.domain.value_objects import LanguagePair
 from ai_interpreter.presentation.console import WIDTH, heading, row
 
 __all__ = ["run_interpret"]
@@ -41,8 +39,6 @@ logger = logging.getLogger(__name__)
 
 _EXIT_OK: Final[int] = 0
 _EXIT_ERROR: Final[int] = 1
-
-_MODEL_RATE: Final[int] = 16000
 
 
 def run_interpret(
@@ -84,74 +80,6 @@ def run_interpret(
     heading("Loading (models warm up once, before any audio flows)")
     row("Direction", str(pair))
 
-    try:
-        if wav is not None:
-            # realtime=True: the file must behave like a microphone, or every
-            # latency number in the summary would be inflated by queue waits.
-            audio_source: object = WavFileSource(
-                wav,
-                frame_ms=container.settings.audio.input.frame_ms,
-                realtime=True,
-            )
-            row("Input", f"WAV file: {wav.name} (real-time paced)")
-        else:
-            mic = container.resolve_input_device(device)
-            audio_source = container.create_microphone_source(mic)
-            row("Input", f"{mic.name}  [{mic.host_api}]")
-
-        started = time.perf_counter()
-        recognizer = container.create_recognizer(pair.source)
-        recognizer.warmup()
-        row(
-            "STT",
-            f"{container.describe_model_for(pair.source)} "
-            f"({(time.perf_counter() - started) * 1000.0:.0f} ms warmup)",
-        )
-
-        started = time.perf_counter()
-        translator = container.create_translator(pair)
-        translator.warmup()
-        row(
-            "MT",
-            f"{translator.model_id} ({(time.perf_counter() - started) * 1000.0:.0f} ms warmup)",
-        )
-
-        synthesizer: SpeechSynthesizer | None
-        sink: AudioSink | None
-        try:
-            started = time.perf_counter()
-            synthesizer = container.create_synthesizer(pair.target)
-            synthesizer.warmup()
-            row(
-                "TTS",
-                f"{synthesizer.provider_id} "
-                f"({(time.perf_counter() - started) * 1000.0:.0f} ms warmup)",
-            )
-            sink = container.create_audio_sink(device_name=out_device)
-            row("Output", f"{sink.device.name}  [{sink.device.host_api}]")
-            if sink.device.is_virtual_cable:
-                row("", "-> select 'CABLE Output' as the mic in Teams/Zoom/Meet")
-        except ConfigurationError as exc:
-            # The designed fallback: no voice for the target language means
-            # captions on screen instead of audio.
-            logger.warning("Captions-only mode: %s", exc)
-            row("TTS", "none - captions only")
-            synthesizer = None
-            sink = None
-
-        vad = container.create_vad()
-        preprocessor = container.create_preprocessor(audio_source.sample_rate)  # type: ignore[attr-defined]
-        segmenter = container.create_segmenter(SampleRate(_MODEL_RATE), language=pair.source)
-        capture = CaptureSession(
-            source=audio_source,  # type: ignore[arg-type]
-            preprocessor=preprocessor,
-            vad=vad,
-            segmenter=segmenter,
-        )
-    except InterpreterError as exc:
-        print(f"\n{exc}\n", file=sys.stderr)
-        return _EXIT_ERROR
-
     flagged_terms: list[str] = []
 
     def on_transcript(transcript: Transcript) -> None:
@@ -174,52 +102,24 @@ def run_interpret(
     def on_error(stage: str, exc: Exception) -> None:
         print(f"  [error in {stage}] {exc}", file=sys.stderr)
 
-    glossary_terms = container.settings.translation.glossary
-    glossary = GlossaryRewriter(glossary_terms) if glossary_terms else None
-    if glossary is not None:
-        row("Glossary", f"{glossary.size} term variant(s) active")
-
-    english_fallback = None
-    if (
-        container.settings.stt.code_switch_fallback
-        and pair.target.code == "en"
-        and pair.source.code != "en"
-    ):
-        try:
-            # Word timestamps regardless of the global setting: transcript
-            # fusion splices by time, and without per-word timings it would
-            # quietly decline on every mixed sentence.
-            english_fallback = container.create_recognizer(pair.target, word_timestamps=True)
-            english_fallback.warmup()
-            fusion = "word fusion for mixed sentences, reroute for English ones"
-            if not container.settings.stt.word_fusion:
-                fusion = "English-heavy utterances are re-recognised in English"
-            row("Code-switch rescue", f"{container.describe_model_for(pair.target)} - {fusion}")
-        except InterpreterError as exc:
-            logger.warning("Code-switch fallback unavailable: %s", exc)
-            english_fallback = None
-
-    pipeline = InterpretationPipeline(
-        capture=capture,
-        recognizer=recognizer,
-        translator=translator,
-        synthesizer=synthesizer,
-        sink=sink,
-        pair=pair,
-        glossary=glossary,
-        english_fallback=english_fallback,
-        fallback_min_score=container.settings.stt.code_switch_min_score,
-        word_fusion=container.settings.stt.word_fusion,
-        events=PipelineEvents(
-            on_transcript=on_transcript,
-            on_translation=on_translation,
-            on_timing=on_timing,
-            on_error=on_error,
-        ),
-        queue_maxsize=container.settings.pipeline.queue_maxsize,
-        max_retries=container.settings.pipeline.max_retries,
-        retry_backoff_s=container.settings.pipeline.retry_backoff_ms / 1000.0,
-    )
+    try:
+        bundle = build_interpretation_bundle(
+            container,
+            pair,
+            PipelineEvents(
+                on_transcript=on_transcript,
+                on_translation=on_translation,
+                on_timing=on_timing,
+                on_error=on_error,
+            ),
+            input_device=device,
+            output_device=out_device,
+            wav=wav,
+            on_progress=row,
+        )
+    except InterpreterError as exc:
+        print(f"\n{exc}\n", file=sys.stderr)
+        return _EXIT_ERROR
 
     heading("Interpreting" + ("" if wav is not None else f" for {seconds:.0f} seconds"))
     if wav is None:
@@ -227,21 +127,15 @@ def run_interpret(
 
     try:
         with container.logging_service.quiet_console():
-            pipeline.start()
+            bundle.pipeline.start()
             try:
-                _wait(pipeline, capture, seconds, wav is not None)
+                _wait(bundle.pipeline, bundle.capture, seconds, wav is not None)
             except KeyboardInterrupt:
                 print("\n  Interrupted.")
     finally:
-        pipeline.stop()
-        recognizer.close()
-        translator.close()
-        if english_fallback is not None:
-            english_fallback.close()
-        if synthesizer is not None:
-            synthesizer.close()
+        bundle.shutdown()
 
-    return _summarise(pipeline, container, flagged_terms)
+    return _summarise(bundle.pipeline, container, flagged_terms)
 
 
 def _wait(

@@ -74,6 +74,7 @@ _REQUIRED_PACKAGES: Final[tuple[tuple[str, str], ...]] = (
     ("sherpa_onnx", "Phase 4b - streaming speech to text"),
     ("onnx", "Phase 4b - model metadata patching"),
     ("sentencepiece", "Phase 5 - translation tokenisation"),
+    ("PySide6", "Phase 8 - desktop interface"),
 )
 
 # External programs. Missing entries are warnings, not failures: none of them
@@ -157,6 +158,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--version",
         action="version",
         version=f"AI Interpreter {__version__}",
+    )
+    parser.add_argument(
+        "--ui",
+        action="store_true",
+        help="launch the desktop interface",
     )
     parser.add_argument(
         "--check",
@@ -516,6 +522,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _EXIT_CONFIG_ERROR
 
     try:
+        if args.ui:
+            # Imported lazily: a broken Qt installation must not take the
+            # console commands down with it.
+            from ai_interpreter.presentation.ui.app import run_ui
+
+            return run_ui(container)
         if args.check:
             return _run_check(container)
         if args.print_config:
@@ -557,7 +569,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"AI Interpreter {__version__}")
         print(f"Profile: {container.selection.profile.value} ({container.selection.reason})")
         print()
-        print("The desktop interface is built in Phase 8. Available now:")
+        print("Available commands:")
+        print("  python -m ai_interpreter --ui              DESKTOP INTERFACE")
         print("  python -m ai_interpreter --check           verify the environment")
         print("  python -m ai_interpreter --list-devices    list audio devices")
         print("  python -m ai_interpreter --record 10       test the microphone")

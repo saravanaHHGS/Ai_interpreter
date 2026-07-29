@@ -52,6 +52,7 @@ pydantic==2.13.4
 pydantic-settings==2.14.2
 pydantic_core==2.46.4
 Pygments==2.20.0
+PySide6_Essentials==6.11.1
 pytest==8.4.2
 pytest-asyncio==1.4.0
 pytest-cov==7.1.0
@@ -62,6 +63,7 @@ sentencepiece==0.2.2
 setuptools==83.0.0
 sherpa-onnx-core==1.13.4
 sherpa_onnx==1.13.4
+shiboken6==6.11.1
 sounddevice==0.5.5
 soundfile==0.14.0
 soxr==1.1.0
@@ -71,4 +73,3 @@ types-PyYAML==6.0.12.20260724
 typing-inspection==0.4.2
 typing_extensions==4.16.0
 wheel==0.47.0
-

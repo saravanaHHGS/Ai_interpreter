@@ -48,6 +48,10 @@ dependencies = [
     "onnx>=1.17,<2",           # metadata patching for exports missing sherpa keys
     # Phase 5 - translation
     "sentencepiece>=0.2,<1",   # IndicTrans2 tokenisation (CT2 needs token strings)
+    # Phase 8 - desktop interface
+    # Essentials only: QtWidgets/QtCore/QtGui without the 300 MB of Addons.
+    # Verified to load and run under Smart App Control (Qt Company signing).
+    "PySide6-Essentials>=6.8,<7",
 ]
 
 [project.optional-dependencies]
