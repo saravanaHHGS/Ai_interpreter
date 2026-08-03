@@ -213,6 +213,25 @@ class TestTranslateBehaviour:
         assert result.is_empty
         assert engine.requests == []
 
+    def test_devanagari_in_english_output_is_discarded(self) -> None:
+        # The live regression: "டெப்ளாய் that" decoded to "देवली के लिया" -
+        # the internal pivot script leaking into what the meeting would
+        # HEAR. An empty translation is dropped silently; Hindi is not.
+        engine = FakeCt2Engine(output_tokens=["▁देवली", "▁के", "▁लिया"])
+        translator, _ = _translator(engine=engine)
+
+        result = translator.translate("டெப்ளாய் that", TA_EN)
+
+        assert result.is_empty
+
+    def test_latin_output_with_passthrough_terms_is_kept(self) -> None:
+        engine = FakeCt2Engine(output_tokens=["▁The", "▁VALD", "▁session"])
+        translator, _ = _translator(engine=engine)
+
+        result = translator.translate("வணக்கம்", TA_EN)
+
+        assert result.translated_text == "The VALD session"
+
     def test_records_latency_and_model_id(self) -> None:
         translator, _ = _translator()
         result = translator.translate("வணக்கம்", TA_EN)

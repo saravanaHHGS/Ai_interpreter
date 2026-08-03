@@ -177,6 +177,28 @@ models:
       - indic-en-200m-ct2/ctranslate2_model/vocab/model.SRC
       - indic-en-200m-ct2/ctranslate2_model/vocab/model.TGT
 
+  # The 1B teacher model the 200M above was distilled from. Benchmarked
+  # head-to-head on live-session sentences (docs/code-switching.md era,
+  # 2026-08-03): quality was a WASH on colloquial spoken Tamil - some wins
+  # ("I did not understand anything"), some losses ("doubt" -> "a
+  # suspicion") - at 4x the latency (mean 0.67 s vs 0.17 s, still
+  # affordable) and a 4 GB download (~1.1 GB RAM at int8). Kept as an
+  # opt-in: point translation.models.indic-en at this identifier to try it.
+  indictrans2-indic-en-1b:
+    task: mt
+    repo_id: adalat-ai/ct2-rotary-indictrans2-indic-en-1B
+    revision: 315c2b0b8ed16e1221410d8aefefe8dffc3485c5
+    languages: ["ta", "hi", "te", "ml", "kn", "bn", "mr", "gu", "pa", "en"]
+    size_mb: 4100
+    runtime: ctranslate2-seq2seq
+    files:
+      - indic-en-1b-ct2/ctranslate2_model/config.json
+      - indic-en-1b-ct2/ctranslate2_model/model.bin
+      - indic-en-1b-ct2/ctranslate2_model/source_vocabulary.json
+      - indic-en-1b-ct2/ctranslate2_model/target_vocabulary.json
+      - indic-en-1b-ct2/ctranslate2_model/vocab/model.SRC
+      - indic-en-1b-ct2/ctranslate2_model/vocab/model.TGT
+
   indictrans2-en-indic:
     task: mt
     repo_id: adalat-ai/ct2-rotary-indictrans2-en-indic-dist-200M

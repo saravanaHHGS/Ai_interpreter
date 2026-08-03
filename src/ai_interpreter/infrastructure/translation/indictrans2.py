@@ -64,6 +64,11 @@ _SPACE_BEFORE_PUNCT = re.compile(r"\s+([.,!?;:%\)\]\}])")
 _SPACE_AFTER_OPEN = re.compile(r"([\(\[\{])\s+")
 _SPACE_AROUND_APOSTROPHE = re.compile(r"\s+'\s*(s|t|re|ve|ll|d|m)\b", re.IGNORECASE)
 
+# The model's internal pivot script. Indic sources are transliterated into
+# Devanagari before encoding, so Devanagari appearing in an ENGLISH output
+# means the decoder derailed - it can never be a legitimate translation.
+_DEVANAGARI = re.compile(r"[ऀ-ॿ]")
+
 
 def _detokenize(text: str) -> str:
     """Tidy sentencepiece output into ordinary typography.
@@ -264,6 +269,21 @@ class IndicTrans2Translator:
 
         output = raw if pair.target.code == "en" else from_devanagari(raw, pair.target)
         output = _detokenize(output)
+
+        # Derailment guard. The model decodes through Devanagari internally
+        # (Indic sources are transliterated before encoding), and on junk
+        # input it can emit Devanagari despite the eng_Latn target tag - a
+        # live session produced "देवली के लिया" for "டெப்ளாய் that", which
+        # would have been SPOKEN into the meeting. Devanagari in an English
+        # translation is never legitimate; an empty translation is dropped
+        # silently by the pipeline, which is the correct outcome.
+        if pair.target.code == "en" and _DEVANAGARI.search(output):
+            logger.warning(
+                "Discarding a derailed translation (Devanagari in English "
+                "output) for %d input chars",
+                len(cleaned),
+            )
+            output = ""
 
         elapsed_ms = (time.perf_counter() - started) * 1000.0
         self._translations += 1
