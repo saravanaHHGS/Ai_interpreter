@@ -539,7 +539,7 @@ class Container:
             descriptor = self.models.get(model_name)
             model_dir = self.model_repository.ensure(descriptor)
 
-            engine = IndicTrans2Translator(
+            engine: Translator = IndicTrans2Translator(
                 model_dir=model_dir,
                 model_id=descriptor.id,
                 direction=direction,
@@ -547,6 +547,7 @@ class Container:
                 beam_size=translation.beam_size,
                 max_input_chars=translation.max_input_chars,
             )
+            engine = self._wrap_online_translator(engine)
             if not translation.cache.enabled:
                 return engine
             return CachedTranslator(
@@ -557,6 +558,54 @@ class Container:
         # Reusing the translator across sessions also carries its LRU cache
         # forward - repeated sentences stay at 0 ms in the next session too.
         return self._cached(("mt", direction), build)
+
+    def _wrap_online_translator(self, local: Translator) -> Translator:
+        """Layer the opt-in cloud LLM over the local engine, if enabled.
+
+        Two gates, both required: ``translation.online.enabled`` in the
+        configuration AND an API key in ``.env``. The local engine always
+        remains as the automatic fallback, so a network failure degrades
+        quality but never silences the interpreter.
+
+        Args:
+            local: The always-available local engine.
+
+        Returns:
+            The local engine, possibly wrapped in a fallback composition
+            with the online provider as primary.
+        """
+        online = self.settings.translation.online
+        if not online.enabled:
+            return local
+        if not self.secrets.has_nim_key:
+            logger.warning(
+                "translation.online.enabled is set but AI_INTERPRETER_NVIDIA_NIM_API_KEY "
+                "is empty in .env - staying fully local"
+            )
+            return local
+
+        from ai_interpreter.application.services.fallback_translator import FallbackTranslator
+        from ai_interpreter.infrastructure.translation.nim_llm import NimLlmTranslator
+
+        assert self.secrets.nvidia_nim_api_key is not None
+        logger.warning(
+            "ONLINE translation active (%s): transcript text of this session "
+            "WILL BE SENT to NVIDIA NIM. Disable translation.online.enabled "
+            "to stay fully local.",
+            online.model,
+        )
+        primary = NimLlmTranslator(
+            api_key=self.secrets.nvidia_nim_api_key.get_secret_value(),
+            model=online.model,
+            timeout_s=online.timeout_ms / 1000.0,
+            # The user's own vocabulary is the context that lets the LLM
+            # recognise transliterated names: நேட்டு -> Nate.
+            context_terms=[
+                *self.settings.stt.hotwords,
+                *self.settings.translation.glossary.keys(),
+            ],
+        )
+        return FallbackTranslator(primary=primary, fallback=local)
 
     def resolve_output_device(self, name_override: str | None = None) -> DeviceInfo:
         """Resolve which playback endpoint to write into.

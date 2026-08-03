@@ -240,6 +240,29 @@ translation:
     max_entries: 5000
     persist: false
 
+  # Online translation through an instruction-tuned LLM (NVIDIA NIM).
+  #
+  # WHY: some meaning lives above the sentence. "இன்னும் ரெண்டு நாள்
+  # நேட்டு கூட meeting tomorrow இருக்கு" contains நேட்டு - a colleague
+  # named Nate - and only a model that understands the scenario knows
+  # that. A 70B LLM handles colloquial code-switched Tamil, names and
+  # context in a way no local 200M sentence model can.
+  #
+  # THE COST: transcript text of your meetings is SENT TO NVIDIA's API.
+  # This is the one feature that breaks the everything-stays-local
+  # promise, which is why it is off by default, requires an API key in
+  # .env (AI_INTERPRETER_NVIDIA_NIM_API_KEY, from build.nvidia.com), and
+  # logs a warning every session it is active. The local engine remains
+  # loaded as an automatic fallback: a network failure degrades quality,
+  # never silences the interpreter. Your glossary terms and hotwords are
+  # sent along as context, so the model knows your names and products.
+  online:
+    enabled: false
+    provider: nim
+    model: "meta/llama-3.3-70b-instruct"
+    # Hard per-request deadline; on expiry the local engine answers.
+    timeout_ms: 6000
+
   # Glossary: intended term -> the transcript forms that should become it.
   #
   # The Tamil recogniser's vocabulary is Tamil-only, so English words spoken
@@ -277,6 +300,8 @@ translation:
     session: ["செஸ்ஸன்"]
     doubt: ["டோப்ட"]
     report: ["ரிப்போர்ட்"]
+    # People's names transliterate too - நேட்டு is a colleague, not a word.
+    Nate: ["நேட்டு", "நேட்"]
 
 tts:
   # All voices run through sherpa-onnx's VITS engine - the runtime already

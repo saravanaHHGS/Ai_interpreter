@@ -295,6 +295,22 @@ class TranslationCacheSection(BaseModel):
     persist: bool
 
 
+class TranslationOnlineSection(BaseModel):
+    """Opt-in cloud LLM translation (NVIDIA NIM).
+
+    The one feature that sends meeting text off the machine, so it is
+    gated twice: this flag AND an API key in ``.env``. The local engine
+    always remains as an automatic fallback.
+    """
+
+    model_config = _STRICT
+
+    enabled: bool
+    provider: str = Field(min_length=1)
+    model: str = Field(min_length=1)
+    timeout_ms: Milliseconds
+
+
 class TranslationSection(BaseModel):
     """Machine translation engine settings."""
 
@@ -310,6 +326,7 @@ class TranslationSection(BaseModel):
     beam_size: int = Field(ge=1, le=10)
     max_input_chars: int = Field(ge=16, le=8192)
     cache: TranslationCacheSection
+    online: TranslationOnlineSection
     # Intended term -> transcript forms that should become it. Applied to
     # transcripts before translation, recovering code-switched English and
     # technical terms the Tamil-only recogniser renders phonetically.
