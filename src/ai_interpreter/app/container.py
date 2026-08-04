@@ -398,6 +398,38 @@ class Container:
 
         return self._cached(("stt", descriptor.id, chosen.code, effective_timestamps), build)
 
+    def create_streaming_partner(self, language: LanguageCode) -> SpeechRecognizer | None:
+        """Build the streaming partner recogniser, if one is configured.
+
+        The partner hears every utterance live alongside the primary
+        recogniser; ``stt.streaming_partner`` names its registry entry.
+
+        Args:
+            language: Language the partner must serve (the target language).
+
+        Returns:
+            The partner recogniser, or ``None`` when none is configured.
+
+        Raises:
+            ConfigurationError: If the configured entry is not a streaming
+                runtime or does not serve the language.
+        """
+        name = self.settings.stt.streaming_partner
+        if not name:
+            return None
+        descriptor = self.models.get(name)
+        if descriptor.runtime != "sherpa-nemo-ctc-streaming":
+            msg = (
+                f"stt.streaming_partner {name!r} has runtime {descriptor.runtime!r}; "
+                "a genuinely streaming model (sherpa-nemo-ctc-streaming) is required."
+            )
+            raise ConfigurationError(msg)
+
+        return self._cached(
+            ("stt-partner", descriptor.id, language.code),
+            lambda: self._create_sherpa(descriptor, language),
+        )
+
     def _create_whisper(
         self,
         descriptor: ModelDescriptor,

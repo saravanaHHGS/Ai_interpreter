@@ -200,6 +200,23 @@ def build_interpretation_bundle(
     if glossary is not None:
         progress("Glossary", f"{glossary.size} term variant(s) active")
 
+    # The partner is gated on its own setting, not stt.streaming: it is
+    # near-free (RTF 0.11) and pays off even when the primary lane is off.
+    english_partner: SpeechRecognizer | None = None
+    if settings.stt.streaming_partner and pair.target.code == "en" and pair.source.code != "en":
+        try:
+            english_partner = container.create_streaming_partner(pair.target)
+            if english_partner is not None:
+                english_partner.warmup()
+                progress(
+                    "Streaming partner",
+                    f"{english_partner.model_id} hears every utterance live - "
+                    "mixed sentences fuse without a re-decode",
+                )
+        except InterpreterError as exc:
+            logger.warning("Streaming partner unavailable: %s", exc)
+            english_partner = None
+
     english_fallback: SpeechRecognizer | None = None
     if settings.stt.code_switch_fallback and pair.target.code == "en" and pair.source.code != "en":
         try:
@@ -236,6 +253,7 @@ def build_interpretation_bundle(
         pair=pair,
         glossary=glossary,
         english_fallback=english_fallback,
+        english_partner=english_partner,  # type: ignore[arg-type]
         fallback_min_score=settings.stt.code_switch_min_score,
         word_fusion=settings.stt.word_fusion,
         streaming_stt=streaming_stt,

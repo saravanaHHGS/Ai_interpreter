@@ -37,6 +37,9 @@ __all__ = ["FusionResult", "fuse_transcripts"]
 # through, mostly-inside keeps it out. Genuine matches sit at 0.8-1.0.
 _MIN_OVERLAP: Final[float] = 0.5
 
+# Below this onset span, a linear clock fit has nothing to hold on to.
+_MIN_SPAN_MS: Final[float] = 120.0
+
 # Punctuation stripped from a spliced replacement: mid-sentence, Whisper's
 # trailing "assessment." full stop would corrupt the surrounding Tamil.
 _TRAILING_PUNCTUATION: Final[str] = ".,!?;:"
@@ -76,6 +79,49 @@ def _word_level_segments(transcript: Transcript) -> list[TranscriptSegment] | No
     return segments
 
 
+def _align_clocks(
+    base_words: list[TranscriptSegment],
+    other_words: list[TranscriptSegment],
+) -> list[TranscriptSegment]:
+    """Rescale the other transcript's timeline onto the base's.
+
+    For recognisers whose internal frame clock disagrees with the primary's
+    - measured: the NeMo streaming model's timestamps run ~30% slow, with
+    drift GROWING along the utterance. Both transcripts describe the same
+    audio, so their first and last word ONSETS mark the same two real
+    moments; the linear map between those onset spans lands every word
+    correctly (verified word-by-word against three live utterances). Word
+    onsets anchor the fit rather than word ends, because ends are derived
+    (next word's onset, or a guess for the last word) and unreliable.
+
+    Args:
+        base_words: The primary transcript's word segments.
+        other_words: The secondary transcript's word segments, in a clock
+            the caller has declared untrustworthy.
+
+    Returns:
+        The secondary segments mapped onto the base clock, or unchanged
+        when either onset span is too short to fit a line through.
+    """
+    base_start = base_words[0].start_ms
+    base_span = base_words[-1].start_ms - base_start
+    other_start = other_words[0].start_ms
+    other_span = other_words[-1].start_ms - other_start
+    if base_span < _MIN_SPAN_MS or other_span < _MIN_SPAN_MS:
+        return other_words
+
+    scale = base_span / other_span
+    return [
+        TranscriptSegment(
+            text=segment.text,
+            start_ms=base_start + (segment.start_ms - other_start) * scale,
+            end_ms=base_start + (segment.end_ms - other_start) * scale,
+            confidence=segment.confidence,
+        )
+        for segment in other_words
+    ]
+
+
 def _overlap_fraction(word: TranscriptSegment, start_ms: float, end_ms: float) -> float:
     """How much of a word's duration lies inside a time window.
 
@@ -96,6 +142,7 @@ def fuse_transcripts(
     base: Transcript,
     other: Transcript,
     min_overlap: float = _MIN_OVERLAP,
+    align_clock: bool = False,
 ) -> FusionResult | None:
     """Splice ``other``'s words into ``base`` where ``base`` is transliterated.
 
@@ -107,6 +154,10 @@ def fuse_transcripts(
             mostly inside flagged time regions are used.
         min_overlap: Fraction of a word's duration that must fall inside a
             flagged region to be spliced.
+        align_clock: Declare that ``other``'s recogniser keeps a different
+            internal clock (the NeMo streaming partner); its timeline is
+            then linearly mapped onto ``base``'s before matching. Leave
+            ``False`` for Whisper, whose clock agrees with the conformer's.
 
     Returns:
         The fusion result, or ``None`` when fusion is not possible (missing
@@ -121,6 +172,9 @@ def fuse_transcripts(
     flagged = [bool(flag_english_tokens(segment.text)) for segment in base_words]
     if not any(flagged):
         return None
+
+    if align_clock:
+        other_words = _align_clocks(base_words, other_words)
 
     pieces: list[str] = []
     replaced: list[str] = []
@@ -141,12 +195,15 @@ def fuse_transcripts(
         while end + 1 < len(base_words) and flagged[end + 1]:
             end += 1
 
-        # Whisper smears word ONSETS backward through leading audio it did
-        # not attribute elsewhere (measured: "World" at 0-760 ms against the
-        # conformer's வேர்ல்ட் at 400-840 ms), while word ENDS are anchored
-        # by the next word's onset. So a word belongs to the region when its
-        # end lands inside it - or, for end-of-utterance words whose end
-        # drifts past the region, when most of its duration lies within.
+        # Two matching rules, chosen by what the timestamps can be trusted
+        # for. Whisper (unaligned) smears word ONSETS backward through
+        # leading audio (measured: "World" at 0-760 ms against the
+        # conformer's வேர்ல்ட் at 400-840 ms) while ENDS are anchored by
+        # the next word's onset - so an end landing inside the region
+        # counts. A clock-ALIGNED transcript has calibrated boundaries on
+        # both sides, and its derived ends can drift into the NEXT region
+        # after rescaling - there, mostly-inside overlap is the only safe
+        # test (verified word-by-word on the live fixtures).
         region_start = base_words[index].start_ms
         region_end = base_words[end].end_ms
         matches = [
@@ -154,7 +211,7 @@ def fuse_transcripts(
             for position, word in enumerate(other_words)
             if position not in used
             and (
-                region_start <= word.end_ms <= region_end
+                (not align_clock and region_start <= word.end_ms <= region_end)
                 or _overlap_fraction(word, region_start, region_end) >= min_overlap
             )
         ]

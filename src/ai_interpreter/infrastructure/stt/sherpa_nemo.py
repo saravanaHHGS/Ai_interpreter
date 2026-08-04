@@ -63,6 +63,15 @@ logger = logging.getLogger(__name__)
 
 _REQUIRED_SAMPLE_RATE: Final[int] = 16000
 
+# Trailing silence fed to a STREAMING model before input_finished. The model
+# holds roughly a chunk of lookahead; without this the last spoken word is
+# silently dropped (measured: "that" vanished from "we need to solve that").
+_FLUSH_PAD_SECONDS: Final[float] = 1.0
+
+# Nominal duration of the last word, on the model's own clock, since no
+# following word onset exists to bound it.
+_LAST_WORD_PAD_S: Final[float] = 0.24
+
 # BPE tokens beginning a new word carry the sentencepiece marker.
 _WORD_MARKER: Final[str] = "▁"  # '▁'
 
@@ -700,10 +709,7 @@ class SherpaNemoStreamingRecognizer:
         try:
             stream = self._engine.create_stream()
             stream.accept_waveform(_REQUIRED_SAMPLE_RATE, utterance.pcm)
-            stream.input_finished()
-            while self._engine.is_ready(stream):
-                self._engine.decode_stream(stream)
-            text = str(self._engine.get_result(stream)).strip()
+            text, segments = self._finish(stream)
         except Exception as exc:
             msg = f"Decoding failed with {self._model_id}: {exc}"
             raise TranscriptionError(msg) from exc
@@ -717,6 +723,7 @@ class SherpaNemoStreamingRecognizer:
             language=self._language,
             confidence=_availability_confidence(text),
             is_final=True,
+            segments=segments,
             model_id=self._model_id,
             latency_ms=elapsed_ms,
         )
@@ -775,10 +782,7 @@ class SherpaNemoStreamingRecognizer:
                         latency_ms=(time.perf_counter() - started) * 1000.0,
                     )
 
-            stream.input_finished()
-            while self._engine.is_ready(stream):
-                self._engine.decode_stream(stream)
-            final_text = str(self._engine.get_result(stream)).strip()
+            final_text, segments = self._finish(stream)
         except TranscriptionError:
             raise
         except Exception as exc:
@@ -794,6 +798,7 @@ class SherpaNemoStreamingRecognizer:
             language=self._language,
             confidence=_availability_confidence(final_text),
             is_final=True,
+            segments=segments,
             model_id=self._model_id,
             latency_ms=elapsed_ms,
         )
@@ -802,6 +807,41 @@ class SherpaNemoStreamingRecognizer:
         """Release the model. Safe to call more than once."""
         self._engine = None
         self._warmed = False
+
+    # -- internals ---------------------------------------------------------
+    def _finish(self, stream: Any) -> tuple[str, tuple[TranscriptSegment, ...]]:
+        """Flush a stream and extract the final text with word segments.
+
+        Two facts, both measured on the real model, shape this:
+
+        - The model holds roughly a chunk of lookahead, so without trailing
+          silence the LAST WORD of an utterance is silently dropped
+          ("we need to solve" instead of "we need to solve that").
+        - Its timestamps are on the model's own frame clock, which runs
+          ~30% slow relative to real time; consumers that align across
+          recognisers (transcript fusion) rescale them, which is why the
+          last word's end is padded on the same clock rather than taken
+          from the real audio length.
+
+        Args:
+            stream: The engine stream, with all real audio already fed.
+
+        Returns:
+            The final text and per-word segments.
+        """
+        stream.accept_waveform(
+            _REQUIRED_SAMPLE_RATE,
+            np.zeros(int(_FLUSH_PAD_SECONDS * _REQUIRED_SAMPLE_RATE), dtype=np.float32),
+        )
+        stream.input_finished()
+        while self._engine.is_ready(stream):
+            self._engine.decode_stream(stream)
+
+        text = str(self._engine.get_result(stream)).strip()
+        tokens = list(self._engine.tokens(stream))
+        stamps = [float(stamp) for stamp in self._engine.timestamps(stream)]
+        total_ms = (stamps[-1] + _LAST_WORD_PAD_S) * 1000.0 if stamps else 0.0
+        return text, _word_segments(tokens, stamps, total_ms)
 
     # -- internals ---------------------------------------------------------
     def _ensure_engine(self) -> None:

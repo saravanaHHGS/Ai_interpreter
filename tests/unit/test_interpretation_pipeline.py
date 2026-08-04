@@ -904,6 +904,136 @@ class TestStreamingLane:
         assert translator.calls == 1
 
 
+class FakePartner:
+    """Streaming partner: consumes frames, finals with word segments on a
+    compressed clock (like the real NeMo model)."""
+
+    def __init__(self, words: list[tuple[str, float, float]], fail: bool = False) -> None:
+        self.words = words
+        self.fail = fail
+        self.streams = 0
+
+    @property
+    def model_id(self) -> str:
+        return "nemo-streaming-en"
+
+    def supports(self, language: LanguageCode) -> bool:
+        return language == ENGLISH
+
+    def transcribe(self, utterance: Utterance) -> Transcript:  # pragma: no cover
+        raise AssertionError("the partner is only ever streamed")
+
+    def transcribe_stream(self, frames, language=None):  # type: ignore[no-untyped-def]
+        self.streams += 1
+        if self.fail:
+            raise TranscriptionError("scripted partner failure")
+        for _ in frames:
+            pass
+        yield _word_transcript(UtteranceId("stream"), self.words, ENGLISH, "nemo-streaming-en")
+
+    def warmup(self) -> None: ...
+    def close(self) -> None: ...
+
+
+class TestStreamingPartner:
+    """The English view arrives from the live partner stream, not a re-decode."""
+
+    # The partner's clock is compressed relative to the primary's (the real
+    # model runs ~30% slow); fusion's clock alignment absorbs it.
+    PARTNER_WORDS = [
+        ("matching", 320.0, 560.0),
+        ("mottum", 560.0, 800.0),
+        ("bending", 800.0, 1000.0),
+        ("work", 1000.0, 1240.0),
+    ]
+
+    def _run(
+        self,
+        recognizer: FakeRecognizer,
+        partner: FakePartner,
+        fallback: FakeRecognizer,
+    ) -> tuple[InterpretationPipeline, FakeTranslator, list[Transcript]]:
+        translator = FakeTranslator()
+        transcripts: list[Transcript] = []
+        pipeline = InterpretationPipeline(
+            capture=FakeCapture(),  # type: ignore[arg-type]
+            recognizer=recognizer,
+            translator=translator,
+            synthesizer=None,
+            sink=None,
+            pair=PAIR,
+            english_fallback=fallback,
+            english_partner=partner,  # type: ignore[arg-type]
+            events=PipelineEvents(on_transcript=transcripts.append),
+        )
+        pipeline.start()
+        try:
+            pipeline._on_capture_state(SegmenterState.SPEECH)
+            for index in range(3):
+                pipeline._on_stream_frame(TestStreamingLane._frame(index), 0.9)
+            pipeline._on_capture_state(SegmenterState.SILENCE)
+            pipeline.submit_utterance(_utterance("u1"))
+            _wait_done(pipeline, 1)
+        finally:
+            pipeline.stop()
+        return pipeline, translator, transcripts
+
+    def test_mixed_sentence_fuses_from_the_partner_without_a_redecode(self) -> None:
+        class MixedRecognizer(FakeRecognizer):
+            def transcribe(self, utterance: Utterance) -> Transcript:
+                self.calls += 1
+                return _word_transcript(
+                    utterance.id, TestWordFusion.TAMIL_WORDS, TAMIL, "conformer-ta"
+                )
+
+        partner = FakePartner(self.PARTNER_WORDS)
+        fallback = FakeRecognizer()
+        pipeline, translator, transcripts = self._run(MixedRecognizer(), partner, fallback)
+
+        assert partner.streams == 1
+        assert fallback.calls == 0  # the serial re-decode never ran
+        assert transcripts[0].text == "matching மட்டும் bending ல இருக்கு"
+        assert transcripts[0].model_id == "conformer-ta+nemo-streaming-en+fusion"
+        assert translator.calls == 1
+        assert pipeline.stats().word_fusions == 1
+
+    def test_pure_tamil_never_waits_for_the_partner(self) -> None:
+        partner = FakePartner(self.PARTNER_WORDS)
+        fallback = FakeRecognizer()
+        pipeline, translator, transcripts = self._run(FakeRecognizer(), partner, fallback)
+
+        # The partner heard the utterance (it always streams) but nothing
+        # consulted it: no flags, no fusion, no fallback decode.
+        assert partner.streams == 1
+        assert fallback.calls == 0
+        assert transcripts[0].text.startswith("heard")
+        assert translator.calls == 1
+        assert pipeline.stats().word_fusions == 0
+
+    def test_partner_failure_falls_back_to_the_serial_decode(self) -> None:
+        class MixedRecognizer(FakeRecognizer):
+            def transcribe(self, utterance: Utterance) -> Transcript:
+                self.calls += 1
+                return _word_transcript(
+                    utterance.id, TestWordFusion.TAMIL_WORDS, TAMIL, "conformer-ta"
+                )
+
+        class WhisperFallback(FakeRecognizer):
+            def transcribe(self, utterance: Utterance) -> Transcript:
+                self.calls += 1
+                return _word_transcript(
+                    utterance.id, TestWordFusion.ENGLISH_WORDS, ENGLISH, "whisper-base"
+                )
+
+        partner = FakePartner(self.PARTNER_WORDS, fail=True)
+        fallback = WhisperFallback()
+        pipeline, _, transcripts = self._run(MixedRecognizer(), partner, fallback)
+
+        assert fallback.calls == 1  # the old serial path caught it
+        assert transcripts[0].text == TestWordFusion.FUSED
+        assert pipeline.stats().word_fusions == 1
+
+
 class TestBargeIn:
     """New speech silences the interpreter."""
 

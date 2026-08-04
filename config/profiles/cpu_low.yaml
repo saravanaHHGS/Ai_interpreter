@@ -26,10 +26,12 @@ stt:
   # 2-core CPU because hyperthread siblings contend for the same units.
   cpu_threads: 2
   beam_size: 1
-  # Every interim decode costs a full encoder pass, so streaming adds load
-  # without reducing end-of-utterance latency on this hardware.
-  streaming: false
-  chunk_ms: 3000
+  # streaming, chunk_ms: inherited from default.yaml. This profile used to
+  # force streaming off, from the Phase 4 era when "streaming" meant
+  # Whisper interim decodes (full encoder passes for zero latency gain).
+  # Since Phase 10 it means the conformer's chunked commitment and the
+  # English partner stream - both designed FOR this hardware tier - and the
+  # stale override was silently disabling them in every real session.
 
 translation:
   provider: indictrans2
@@ -47,5 +49,6 @@ pipeline:
   inference_lane: serial
   queue_maxsize: 2
 
-vad:
-  min_silence_ms: 350
+# vad: inherited from default.yaml. A 350 ms override here outlived the
+# measurement that raised the default to 500 ms (mid-sentence fragmentation
+# destroys translation quality) and was silently undoing it.

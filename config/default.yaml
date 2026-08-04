@@ -182,6 +182,15 @@ stt:
     - NordBord
     - ForceFrame
 
+  # Streaming English partner: a second, near-free recogniser (RTF 0.11)
+  # that hears EVERY utterance live alongside the Tamil model. At the end
+  # of an utterance its English view is already decoded, so word fusion for
+  # mixed sentences ("matching மட்டும் pending ல இருக்கு") costs ~0 ms
+  # instead of the ~2 s serial Whisper re-decode it used to pay. Whisper
+  # remains for the wholesale reroute of fully-English sentences, where its
+  # hotword biasing matters. null disables the partner.
+  streaming_partner: nemo-streaming-en
+
   # Code-switch rescue. The Tamil recogniser's vocabulary is Tamil-only, so
   # an ENGLISH sentence spoken into it comes out as phonetic Tamil soup
   # ("இ பஸ் கன் கிரெட் மோர் பிரான்ச" for "e-bus can create more branches").

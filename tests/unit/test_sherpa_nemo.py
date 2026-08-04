@@ -434,7 +434,12 @@ class FakeOnlineStream:
 
 
 class FakeOnlineEngine:
-    """Reveals one scripted word per second of audio received."""
+    """Reveals one scripted word per second of audio received.
+
+    Mirrors the real engine's shape: space-marked tokens and per-token
+    timestamps on the model's own clock (here 0.5 s per word, deliberately
+    NOT real time - the real model's clock runs slow too).
+    """
 
     def __init__(self, words: list[str]) -> None:
         self._words = words
@@ -448,10 +453,18 @@ class FakeOnlineEngine:
     def decode_stream(self, stream: FakeOnlineStream) -> None:  # pragma: no cover
         raise AssertionError("is_ready is always False")
 
-    def get_result(self, stream: FakeOnlineStream) -> str:
+    def _revealed(self, stream: FakeOnlineStream) -> list[str]:
         seconds = sum(chunk.size for chunk in stream.samples) / 16000.0
-        revealed = self._words[: int(seconds)]
-        return " ".join(revealed)
+        return self._words[: int(seconds)]
+
+    def get_result(self, stream: FakeOnlineStream) -> str:
+        return " ".join(self._revealed(stream))
+
+    def tokens(self, stream: FakeOnlineStream) -> list[str]:
+        return [f" {word}" for word in self._revealed(stream)]
+
+    def timestamps(self, stream: FakeOnlineStream) -> list[float]:
+        return [0.5 * index for index in range(len(self._revealed(stream)))]
 
 
 def _online(words: list[str], **kwargs: Any) -> SherpaNemoStreamingRecognizer:
@@ -496,6 +509,22 @@ class TestOnlineStreaming:
 
         assert transcript.text == "hi hello"
         assert transcript.is_final
+
+    def test_final_transcripts_carry_word_segments(self) -> None:
+        # Word segments on the model's own clock are what transcript fusion
+        # aligns (and rescales) against.
+        recognizer = _online(["we", "need", "that"])
+        transcript = recognizer.transcribe(_utterance(3.0, language=ENGLISH))
+
+        assert [segment.text for segment in transcript.segments] == ["we", "need", "that"]
+        assert [segment.start_ms for segment in transcript.segments] == [0.0, 500.0, 1000.0]
+
+    def test_streamed_final_carries_word_segments(self) -> None:
+        recognizer = _online(["hi", "hello"])
+        final = list(recognizer.transcribe_stream(iter(_frames(2.0))))[-1]
+
+        assert final.is_final
+        assert [segment.text for segment in final.segments] == ["hi", "hello"]
 
     def test_rejects_the_wrong_language(self) -> None:
         recognizer = _online(["hi"])

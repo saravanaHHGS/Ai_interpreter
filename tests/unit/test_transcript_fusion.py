@@ -168,6 +168,62 @@ class TestFusion:
         assert result.text == "World assessment முடிஞ்சிடுச்சு"
 
 
+class TestClockAlignment:
+    """Fusing against the streaming partner, whose clock runs ~30% slow.
+
+    The fixtures are the EXACT timings both models produced on live
+    utterance 3: the conformer on real time, the NeMo streaming partner on
+    its own compressed frame clock (word onsets 0.32-1.00 s for speech that
+    really spans 0.40-1.68 s).
+    """
+
+    TAMIL = [
+        ("மேட்சிங்", 400, 880),
+        ("மட்டும்", 880, 1120),
+        ("பெண்டிங்", 1120, 1520),
+        ("ல", 1520, 1680),
+        ("இருக்கு", 1680, 2700),
+    ]
+    PARTNER = [
+        ("matching", 320, 560),
+        ("mottum", 560, 800),
+        ("bending", 800, 1000),
+        ("work", 1000, 1240),
+    ]
+
+    def test_aligned_partner_words_splice_correctly(self) -> None:
+        tamil = _transcript(self.TAMIL)
+        partner = _transcript(self.PARTNER, language=ENGLISH)
+
+        result = fuse_transcripts(tamil, partner, align_clock=True)
+
+        assert result is not None
+        # Each side's good half: the English words land in their flagged
+        # regions; the partner's garbled renderings of TAMIL words
+        # ("mottum" for மட்டும், "work" for இருக்கு) stay out.
+        assert result.text == "matching மட்டும் bending ல இருக்கு"
+
+    def test_without_alignment_the_raw_clock_misfuses(self) -> None:
+        # The reason align_clock exists: raw partner times are compressed,
+        # so region matching cannot land every word where it belongs.
+        tamil = _transcript(self.TAMIL)
+        partner = _transcript(self.PARTNER, language=ENGLISH)
+
+        result = fuse_transcripts(tamil, partner, align_clock=False)
+
+        assert result is None or result.text != "matching மட்டும் bending ல இருக்கு"
+
+    def test_short_spans_are_left_unscaled(self) -> None:
+        # One word gives a line-fit nothing to hold on to.
+        tamil = _transcript([("பெண்டிங்", 0, 500), ("இருக்கு", 500, 1000)])
+        partner = _transcript([("pending", 0, 400)], language=ENGLISH)
+
+        result = fuse_transcripts(tamil, partner, align_clock=True)
+
+        assert result is not None
+        assert result.text == "pending இருக்கு"
+
+
 class TestDeclining:
     """Fusion refuses rather than guessing."""
 

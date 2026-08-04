@@ -13,8 +13,9 @@ stt:
   compute_type: int8
   cpu_threads: 6
   beam_size: 1
-  streaming: false
-  chunk_ms: 3000
+  # streaming, chunk_ms: inherited from default.yaml (chunked-commitment
+  # streaming and the partner stream; a Phase 4-era override that predates
+  # them was silently disabling both).
 
 translation:
   provider: indictrans2
@@ -28,5 +29,5 @@ pipeline:
   inference_lane: parallel
   queue_maxsize: 4
 
-vad:
-  min_silence_ms: 320
+# vad: inherited from default.yaml; whole sentences beat 180 ms of
+# endpoint latency on every tier (fragments destroy translation quality).

@@ -76,6 +76,42 @@ applied after the models have had their say. It now also repairs the
 English recogniser's mishearings inside fused text (e.g. `pending:
 ["Bending"]`).
 
+## The dual-stream redesign (2026-08-04)
+
+The serial repair had an architectural flaw: mixed sentences - the whole
+point of this system - were the *slowest*, because Whisper re-decoded the
+entire utterance after the conformer finished (+1.7-2.6 s, serial).
+
+The redesign runs a second STREAMING recogniser (`nemo-streaming-en`,
+measured RTF 0.11 - near-free) on every utterance, live, in parallel with
+the conformer. At end-of-utterance the English view already exists, so
+fusion costs ~0 ms instead of a re-decode. Whisper is demoted to the
+wholesale-English reroute, where its hotword biasing matters - and when it
+is unavailable (Smart App Control blocked its DLLs again the day this
+shipped, proving the point), the partner's text serves the reroute too.
+
+Three measured facts shape the implementation:
+
+- The partner drops the LAST WORD of an utterance unless ~1 s of silence
+  is fed before ``input_finished`` (its chunk lookahead).
+- Its timestamps run on its own frame clock, ~30% slow with growing drift;
+  fusion linearly maps its word-onset span onto the primary's
+  (``align_clock=True``), verified word-by-word on live fixtures.
+- After rescaling, derived word ENDS can drift into the next region, so
+  clock-aligned matching uses mostly-inside overlap only; the end-in-region
+  shortcut remains exclusively for Whisper's smeared onsets.
+
+Open question, deliberately left to live measurement: on heavily contended
+replays the partner sometimes garbles product names ("aman" where Whisper
+heard "World assessment") - CTC has no hotword biasing. If live sessions
+show the same, the next step is a vocabulary guard on partner splices.
+
+Also fixed here: the ``cpu_low``/``cpu_high`` profiles still carried
+``streaming: false`` and short ``min_silence_ms`` overrides from the
+Phase 4 Whisper era - silently disabling chunked streaming, the partner,
+and the anti-fragmentation endpoint in every real session. Profile
+overrides now exist only where a hardware reason justifies them.
+
 ## Cost
 
 Pure Tamil pays nothing (no flags, no English decode). A flagged utterance

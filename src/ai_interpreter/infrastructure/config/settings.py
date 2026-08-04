@@ -272,6 +272,11 @@ class SttSection(BaseModel):
     # ("GamePlan" instead of "game plan"). The glossary's canonical terms are
     # added automatically; list extras here.
     hotwords: list[str]
+    # Streaming English partner model (registry identifier), or null. When
+    # set, it hears every utterance live alongside the primary recogniser
+    # (measured cost RTF 0.11), so word fusion has its English view already
+    # decoded at end-of-utterance instead of paying a serial re-decode.
+    streaming_partner: str | None
     # When a "Tamil" transcript is phonotactically mostly English (the
     # Tamil-only recogniser transliterating an English sentence), re-recognise
     # the utterance with the English model and use its text directly.

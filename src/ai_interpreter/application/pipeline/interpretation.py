@@ -61,7 +61,7 @@ from ai_interpreter.application.services.code_switch import (
 )
 from ai_interpreter.application.services.glossary import GlossaryRewriter
 from ai_interpreter.application.services.streaming_transcriber import UtteranceStreamer
-from ai_interpreter.application.services.transcript_fusion import fuse_transcripts
+from ai_interpreter.application.services.transcript_fusion import FusionResult, fuse_transcripts
 from ai_interpreter.application.services.utterance_segmenter import SegmenterState
 from ai_interpreter.domain.entities import AudioFrame, Transcript, Translation, Utterance
 from ai_interpreter.domain.errors import InterpreterError
@@ -96,6 +96,11 @@ _STREAM_PREROLL_FRAMES = 12
 # Ceiling on waiting for a streamed final transcript: the largest possible
 # uncommitted tail (max_buffer_seconds, 12 s) at the measured RTF, doubled.
 _STREAM_RESULT_TIMEOUT_SECONDS = 15.0
+
+# The partner stream decodes during speech at RTF 0.11; at end-of-utterance
+# only its one-second flush pad remains. Waiting longer than this means
+# something is wrong, and fusion falls back to the serial decode.
+_PARTNER_RESULT_TIMEOUT_SECONDS = 4.0
 
 _T = TypeVar("_T")
 
@@ -221,6 +226,15 @@ class InterpretationPipeline:
             wholesale and bypasses translation; a *mixed* transcript keeps
             its Tamil and has only the flagged words replaced by the English
             recogniser's words from the same time window (word fusion).
+        english_partner: STREAMING recogniser for the target language that
+            hears every utterance live, in parallel with the primary (its
+            measured cost is RTF 0.11 - near-free on an otherwise idle
+            speech-time CPU). When present, word fusion uses its transcript
+            - already decoded at end-of-utterance - instead of paying
+            ``english_fallback``'s serial re-decode, which removes the
+            ~2 s penalty mixed sentences used to carry. The fallback still
+            serves the wholesale reroute, where its hotword biasing earns
+            its keep.
         fallback_min_score: Flagged-word fraction (with at least two flagged
             words) that triggers the wholesale reroute; half the utterance
             flagged always triggers.
@@ -255,6 +269,7 @@ class InterpretationPipeline:
         events: PipelineEvents | None = None,
         glossary: GlossaryRewriter | None = None,
         english_fallback: SpeechRecognizer | None = None,
+        english_partner: StreamingSpeechRecognizer | None = None,
         fallback_min_score: float = 0.3,
         word_fusion: bool = True,
         streaming_stt: bool = False,
@@ -272,6 +287,7 @@ class InterpretationPipeline:
         self._events = events or PipelineEvents()
         self._glossary = glossary
         self._english_fallback = english_fallback
+        self._english_partner = english_partner if pair.target.code == "en" else None
         self._fallback_min_score = fallback_min_score
         self._word_fusion = word_fusion
         self._queue_maxsize = queue_maxsize
@@ -290,16 +306,18 @@ class InterpretationPipeline:
         self._streaming_stt = streaming_stt and isinstance(recognizer, StreamingSpeechRecognizer)
         self._stream_min_ms = stream_min_seconds * 1000.0
         self._streamer: UtteranceStreamer | None = None
+        self._partner_streamer: UtteranceStreamer | None = None
         self._stream_ring: deque[AudioFrame] = deque(maxlen=_STREAM_PREROLL_FRAMES)
         self._speech_buffer: list[AudioFrame] = []
         self._speech_ms = 0.0
         self._in_speech = False
         self._streams: dict[str, UtteranceStreamer] = {}
+        self._partner_streams: dict[str, UtteranceStreamer] = {}
 
         # Wire ourselves into the capture session.
         capture._on_utterance = self.submit_utterance
         capture._on_state_change = self._on_capture_state
-        if self._streaming_stt:
+        if self._streaming_stt or self._english_partner is not None:
             capture._on_frame = self._on_stream_frame
 
     # -- lifecycle ---------------------------------------------------------
@@ -332,11 +350,13 @@ class InterpretationPipeline:
             timeout: Seconds to wait for the worker.
         """
         self._capture.stop()
-        # A stream still open mid-speech must be released or its thread
-        # waits forever for frames that will never come.
+        # Streams still open mid-speech must be released or their threads
+        # wait forever for frames that will never come.
         streamer, self._streamer = self._streamer, None
-        if streamer is not None:
-            streamer.finish()
+        partner, self._partner_streamer = self._partner_streamer, None
+        for opened in (streamer, partner):
+            if opened is not None:
+                opened.finish()
         self._stop.set()
         self._queue_ready.set()
 
@@ -386,19 +406,22 @@ class InterpretationPipeline:
         Args:
             utterance: The finished utterance.
         """
-        # Hand the live stream over to this utterance: end-of-utterance means
-        # the streamer can decode its tail while the worker gets scheduled.
-        # Short utterances never opened one and decode offline.
+        # Hand the live streams over to this utterance: end-of-utterance
+        # means each streamer can decode its tail while the worker gets
+        # scheduled. Short utterances never opened a primary stream and
+        # decode offline; the partner stream runs for every utterance.
         streamer, self._streamer = self._streamer, None
+        partner, self._partner_streamer = self._partner_streamer, None
         self._in_speech = False
         self._speech_buffer.clear()
         self._speech_ms = 0.0
-        if streamer is not None:
-            streamer.finish()
-            self._streams[str(utterance.id)] = streamer
-            while len(self._streams) > self._queue_maxsize + 1:
-                # Utterances dropped by backpressure never collect theirs.
-                self._streams.pop(next(iter(self._streams)))
+        for opened, streams in ((streamer, self._streams), (partner, self._partner_streams)):
+            if opened is not None:
+                opened.finish()
+                streams[str(utterance.id)] = opened
+                while len(streams) > self._queue_maxsize + 1:
+                    # Utterances dropped by backpressure never collect theirs.
+                    streams.pop(next(iter(streams)))
 
         with self._lock:
             self._counters.utterances_in += 1
@@ -426,18 +449,26 @@ class InterpretationPipeline:
             with self._lock:
                 self._counters.barge_ins += 1
 
-        # Streaming lane: speech onset starts buffering (seeded with the
-        # pre-roll ring so the decode sees the same leading audio the
-        # offline path would); the stream itself only opens once speech has
-        # lasted long enough for chunked commitment to pay.
-        if self._streaming_stt:
-            if state is SegmenterState.SPEECH and self._streamer is None:
+        # Streaming lanes. The PARTNER stream opens at every speech onset -
+        # at RTF 0.11 it is near-free, and having the English view already
+        # decoded at end-of-utterance is what removed the serial re-decode
+        # from mixed sentences. The PRIMARY stream keeps its threshold:
+        # below chunk+margin it cannot commit early and only contends.
+        # Both are seeded with the pre-roll ring so they hear the same
+        # leading audio the offline decode would.
+        if state is SegmenterState.SPEECH and not self._in_speech:
+            if self._english_partner is not None and self._partner_streamer is None:
+                partner = UtteranceStreamer(self._english_partner, self._pair.target)
+                for frame in self._stream_ring:
+                    partner.push(frame)
+                self._partner_streamer = partner
+            if self._streaming_stt and self._streamer is None:
                 self._speech_buffer.extend(self._stream_ring)
                 self._speech_ms = sum(frame.duration_ms for frame in self._speech_buffer)
-                self._stream_ring.clear()
-                self._in_speech = True
-            elif state is SegmenterState.SILENCE:
-                self._in_speech = False
+            self._stream_ring.clear()
+            self._in_speech = True
+        elif state is SegmenterState.SILENCE:
+            self._in_speech = False
 
         if self._events.on_state is not None:
             self._events.on_state(state)
@@ -449,11 +480,16 @@ class InterpretationPipeline:
             frame: Processed 16 kHz frame from capture.
             probability: Speech probability (unused; the segmenter decides).
         """
+        if self._partner_streamer is not None:
+            self._partner_streamer.push(frame)
+
         if self._streamer is not None:
             self._streamer.push(frame)
             return
         if not self._in_speech:
             self._stream_ring.append(frame)
+            return
+        if not self._streaming_stt:
             return
 
         self._speech_buffer.append(frame)
@@ -634,12 +670,11 @@ class InterpretationPipeline:
             when the wholesale reroute made translation unnecessary.
         """
         fallback = self._english_fallback
-        if fallback is None or transcript.is_empty or self._pair.target.code != "en":
+        if transcript.is_empty or self._pair.target.code != "en":
+            self._partner_streams.pop(str(utterance.id), None)
             return transcript, None
 
         flags = flag_english_tokens(transcript.text)
-        if not flags:
-            return transcript, None
         score = english_phonetic_score(transcript.text)
         heavily_english = score >= 0.5 or (len(flags) >= 2 and score >= self._fallback_min_score)
         # A native anchor word marks the sentence as genuinely mixed, which
@@ -649,41 +684,52 @@ class InterpretationPipeline:
         try_fusion = self._word_fusion and (
             has_native_anchor(transcript.text) or not heavily_english
         )
-        if not try_fusion and not heavily_english:
+        if not flags or (not try_fusion and not heavily_english):
+            # No repair needed: drop the partner's stream WITHOUT waiting
+            # for its flush decode - pure Tamil must not pay for it.
+            self._partner_streams.pop(str(utterance.id), None)
+            return transcript, None
+
+        partner = self._collect_partner(utterance)
+        if fallback is None and partner is None:
             return transcript, None
 
         logger.debug(
-            "Code-switch repair for %s (score %.2f, flags %d, fusion=%s)",
+            "Code-switch repair for %s (score %.2f, flags %d, fusion=%s, partner=%s)",
             utterance.id,
             score,
             len(flags),
             try_fusion,
+            partner is not None,
         )
-        english = self._with_retries(
-            "stt-fallback",
-            lambda: fallback.transcribe(replace(utterance, language=self._pair.target)),
-        )
-        if english is None or english.is_empty:
-            return transcript, None
 
-        if try_fusion:
+        # Fusion, cheapest source first: the partner stream already decoded
+        # the English view DURING the speech, so using it costs nothing.
+        # Its clock is declared skewed (measured ~30% slow); fusion rescales.
+        if try_fusion and partner is not None and not partner.is_empty:
+            fused = fuse_transcripts(transcript, partner, align_clock=True)
+            if fused is not None:
+                return self._apply_fusion(utterance, transcript, partner, fused), None
+
+        # Partner absent or declined: the serial Whisper decode is the
+        # remaining source for both fusion and the wholesale reroute.
+        english: Transcript | None = None
+        if fallback is not None:
+            english = self._with_retries(
+                "stt-fallback",
+                lambda: fallback.transcribe(replace(utterance, language=self._pair.target)),
+            )
+        if english is None or english.is_empty:
+            # Wholesale can still ride the partner's text when Whisper is
+            # unavailable - full-English speech is what it hears best.
+            if heavily_english and not try_fusion and partner is not None and not partner.is_empty:
+                english = partner
+            else:
+                return transcript, None
+        elif try_fusion:
             fused = fuse_transcripts(transcript, english)
             if fused is not None:
-                with self._lock:
-                    self._counters.word_fusions += 1
-                logger.debug(
-                    "Word fusion for %s replaced %d word(s) with %d",
-                    utterance.id,
-                    len(fused.replaced),
-                    len(fused.inserted),
-                )
-                repaired = replace(
-                    transcript,
-                    text=fused.text,
-                    segments=(),
-                    model_id=f"{transcript.model_id}+{english.model_id}+fusion",
-                )
-                return repaired, None
+                return self._apply_fusion(utterance, transcript, english, fused), None
             # Fusion declined (no word timestamps, or no English words in
             # any flagged window). An English-heavy sentence still deserves
             # the wholesale repair rather than translating soup.
@@ -700,6 +746,59 @@ class InterpretationPipeline:
             model_id=f"{english.model_id}+direct",
         )
         return english, direct
+
+    def _apply_fusion(
+        self,
+        utterance: Utterance,
+        transcript: Transcript,
+        english: Transcript,
+        fused: FusionResult,
+    ) -> Transcript:
+        """Record and apply a successful word fusion.
+
+        Args:
+            utterance: The utterance being repaired.
+            transcript: The source-language transcript.
+            english: The English view the words came from.
+            fused: The fusion result.
+
+        Returns:
+            The repaired transcript.
+        """
+        with self._lock:
+            self._counters.word_fusions += 1
+        logger.debug(
+            "Word fusion for %s replaced %d word(s) with %d (from %s)",
+            utterance.id,
+            len(fused.replaced),
+            len(fused.inserted),
+            english.model_id,
+        )
+        return replace(
+            transcript,
+            text=fused.text,
+            segments=(),
+            model_id=f"{transcript.model_id}+{english.model_id}+fusion",
+        )
+
+    def _collect_partner(self, utterance: Utterance) -> Transcript | None:
+        """Collect the partner stream's English view of an utterance.
+
+        Args:
+            utterance: The utterance being interpreted.
+
+        Returns:
+            The partner's final transcript, or ``None`` when no partner ran
+            or it failed. The wait is short: at end-of-utterance the partner
+            has already decoded everything but its flush tail.
+        """
+        streamer = self._partner_streams.pop(str(utterance.id), None)
+        if streamer is None:
+            return None
+        transcript = streamer.result(timeout=_PARTNER_RESULT_TIMEOUT_SECONDS)
+        if transcript is None or streamer.error is not None:
+            return None
+        return replace(transcript, utterance_id=utterance.id)
 
     def _speak(self, translation: Translation) -> tuple[float | None, float]:
         """Synthesise a translation into the sink, chunk by chunk.
